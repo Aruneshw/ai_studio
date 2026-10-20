@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Terminal, ShieldAlert, CheckCircle, X, Play, Copy, Check } from 'lucide-react';
+import { Terminal, X, Play, Copy, Check } from 'lucide-react';
 
 export default function CommandApprovalModal({ 
   isOpen, 
@@ -8,7 +8,8 @@ export default function CommandApprovalModal({
   command = '', 
   title = 'Command Execution Approval Required',
   explanation = 'The studio has generated the following CLI command. Please inspect and approve before execution.',
-  riskLevel = 'Safe' // 'Safe', 'Resource Intensive', 'Destructive'
+  riskLevel = 'Safe', // 'Safe', 'Resource Intensive', 'Destructive'
+  error = null
 }) {
   const [editedCommand, setEditedCommand] = useState(command);
   const [copied, setCopied] = useState(false);
@@ -92,6 +93,12 @@ export default function CommandApprovalModal({
           />
         </div>
 
+        {error && (
+          <div style={{ marginBottom: '12px', padding: '8px 10px', borderRadius: '6px', background: 'rgba(244,63,94,0.1)', border: '1px solid rgba(244,63,94,0.35)', color: '#fda4af', fontSize: '12px' }}>
+            {error}
+          </div>
+        )}
+
         {/* Action Buttons */}
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
           <button className="btn btn-secondary" onClick={onClose}>
@@ -99,10 +106,7 @@ export default function CommandApprovalModal({
           </button>
           <button 
             className="btn btn-primary" 
-            onClick={() => {
-              onApprove(editedCommand);
-              onClose();
-            }}
+            onClick={() => onApprove(editedCommand)}
           >
             <Play size={14} />
             Approve & Execute Command

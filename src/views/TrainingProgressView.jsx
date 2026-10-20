@@ -1,214 +1,122 @@
-import React, { useState, useEffect } from 'react';
-import LossLandscape3D from '../components/3d/LossLandscape3D';
-import { Activity, Pause, Square, Terminal, Cpu, Clock, CheckCircle2, AlertTriangle, ArrowRight } from 'lucide-react';
+import React, { useEffect, useMemo, useRef } from 'react';
+import { Activity, Square, Clock, CheckCircle2, AlertTriangle, XOctagon } from 'lucide-react';
+import NeuralNetwork3D from '../components/3d/NeuralNetwork3D';
+import { api, useApi, fmtDuration, fmtNum } from '../api';
+import { EmptyState, ErrorBox, LineChart, Stat } from '../components/common/ui';
 
-export default function TrainingProgressView({ 
-  trainingState = {
-    isRunning: true,
-    step: 520,
-    maxSteps: 6000,
-    epoch: 1,
-    maxEpochs: 3,
-    loss: 0.853,
-    evalLoss: 0.912,
-    vramUsed: 5.1,
-    vramTotal: 6.0,
-    gpuUtil: 88,
-    elapsed: '1h 23m 12s',
-    eta: '2h 10m'
-  },
-  onStopTraining,
-  onNavigate
-}) {
-  const [step, setStep] = useState(trainingState.step);
-  const [loss, setLoss] = useState(trainingState.loss);
-  const [isPaused, setIsPaused] = useState(false);
+const STATE_BADGE = { running: 'badge-emerald', succeeded: 'badge-cyan', failed: 'badge-rose', stopped: 'badge-amber', interrupted: 'badge-amber' };
 
-  // Live simulation tick
-  useEffect(() => {
-    if (isPaused) return;
-    const interval = setInterval(() => {
-      setStep((prev) => {
-        if (prev >= 6000) return 6000;
-        return prev + 1;
-      });
-      setLoss((prev) => Math.max(0.42, prev - 0.0003));
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [isPaused]);
+export default function TrainingProgressView({ runs = [], runId, onSelectRun, onRunsChanged, onNavigate, system }) {
+  const summary = runs.find((r) => r.id === runId);
+  const running = summary?.state === 'running';
+  const detail = useApi(runId ? `/api/runs/${runId}` : null, running ? 2000 : 0);
+  const log = useApi(runId ? `/api/runs/${runId}/log?lines=300` : null, running ? 2000 : 0);
+  const net = useApi(summary ? `/api/models/${summary.config.model_id}/network?planes=8&grid=14` : null);
+  const logRef = useRef(null);
+  useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [log.data]);
+  useEffect(() => { if (detail.data && summary && detail.data.state !== summary.state) onRunsChanged(); }, [detail.data?.state]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const progressPct = ((step / 6000) * 100).toFixed(1);
+  const d = detail.data;
+  const metrics = useMemo(() => d?.metrics || [], [d]);
+  const logs = metrics.filter((x) => x.event === 'log');
+  const train = logs.filter((x) => x.loss !== undefined).map((x) => [x.step, x.loss]);
+  const evalL = logs.filter((x) => x.eval_loss !== undefined).map((x) => [x.step, x.eval_loss]);
+  const lr = logs.filter((x) => x.learning_rate !== undefined).map((x) => [x.step, x.learning_rate * 1e4]);
+  const grad = logs.filter((x) => x.grad_norm !== undefined).map((x) => [x.step, x.grad_norm]);
+  const last = logs[logs.length - 1] || {};
+  const start = metrics.find((x) => x.event === 'start');
+  const lastStatus = [...metrics].reverse().find((x) => ['loading', 'model', 'dataset', 'saving', 'stopping'].includes(x.event));
+  const modelInfo = metrics.find((x) => x.event === 'model');
 
+  let eta = null;
+  let elapsed = null;
+  if (start) {
+    const endT = d?.ended || (running ? Date.now() / 1000 : (last.time || start.time));
+    elapsed = endT - start.time;
+    if (running && last.step && last.max_steps) eta = ((last.time - start.time) / last.step) * (last.max_steps - last.step);
+  }
+  const gpu = system?.gpus?.[0];
+
+  if (!runs.length) {
+    return (
+      <EmptyState icon={Activity} title="No training runs yet"
+        action={<button className="btn btn-primary" onClick={() => onNavigate('fine_tuning')}>Configure fine-tuning</button>}>
+        Start a run from Fine-Tuning Setup — progress, loss curves and logs from the real Unsloth process appear here.
+      </EmptyState>
+    );
+  }
+
+  const pct = last.max_steps ? (last.step / last.max_steps) * 100 : 0;
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-      {/* Top Training Status Banner */}
-      <div className="card" style={{ padding: '18px 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-          <div style={{ width: '42px', height: '42px', borderRadius: '10px', background: 'rgba(16, 185, 129, 0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Activity size={22} color="#10b981" />
-          </div>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <h2 style={{ fontSize: '18px', fontWeight: 700, color: '#f8fafc' }}>
-                Fine-Tuning Execution in Progress
-              </h2>
-              <span className="status-chip">
-                <span className="pulse-dot"></span>
-                <span>{isPaused ? 'Paused' : 'Running (Step ' + step + ')'}</span>
-              </span>
-            </div>
-            <p style={{ fontSize: '12px', color: '#94a3b8', marginTop: '2px' }}>
-              Exp-01: Llama 3.2 8B &bull; LoRA (r=16, α=32) &bull; alpaca_instructions.jsonl &bull; Unsloth Triton Kernels
-            </p>
-          </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div className="card" style={{ padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+          <select className="input" style={{ width: 380 }} value={runId || ''} onChange={(e) => onSelectRun(e.target.value)}>
+            {runs.map((r) => <option key={r.id} value={r.id}>{r.id} — {r.state}</option>)}
+          </select>
+          {summary && <span className={`badge ${STATE_BADGE[summary.state] || 'badge-purple'}`}>{summary.state}</span>}
         </div>
-
-        {/* Action Controls */}
-        <div style={{ display: 'flex', gap: '10px' }}>
-          <button 
-            className="btn btn-secondary"
-            onClick={() => setIsPaused(!isPaused)}
-          >
-            <Pause size={14} />
-            <span>{isPaused ? 'Resume' : 'Pause Run'}</span>
-          </button>
-          <button 
-            className="btn btn-danger"
-            onClick={onStopTraining}
-          >
-            <Square size={14} />
-            <span>Stop Training</span>
-          </button>
-          <button 
-            className="btn btn-outline-cyan"
-            onClick={() => onNavigate('terminal')}
-          >
-            <Terminal size={14} />
-            <span>View CLI Logs</span>
-          </button>
-        </div>
+        {running && (
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn btn-secondary" onClick={() => api(`/api/runs/${runId}/stop`, { method: 'POST' })}><Square size={13} /> Stop & save</button>
+            <button className="btn btn-danger" onClick={() => summary.jobId && api(`/api/jobs/${summary.jobId}/stop`, { method: 'POST' }).then(onRunsChanged)}><XOctagon size={13} /> Kill</button>
+          </div>
+        )}
       </div>
+      <ErrorBox>{detail.error}</ErrorBox>
+      {d?.error && <ErrorBox>{d.error}</ErrorBox>}
 
-      {/* Metrics Stat Row (Matching Screen 10 Mockup) */}
+      {summary && (
+        <div className="card" style={{ fontSize: 12, color: '#94a3b8' }}>
+          <strong style={{ color: '#f1f5f9' }}>{summary.config.model_name}</strong> · {summary.config.method.toUpperCase()} · {summary.config.dataset} ({summary.config.dataset_records} records)
+          · lr {summary.config.learning_rate} · batch {summary.config.batch_size}×{summary.config.grad_accum} · seq {summary.config.max_seq_length}
+          {summary.config.method !== 'full' && ` · r=${summary.config.lora_r} α=${summary.config.lora_alpha}`}
+          {modelInfo && ` · trainable ${modelInfo.trainable.toLocaleString()} / ${modelInfo.total.toLocaleString()} params (${((modelInfo.trainable / modelInfo.total) * 100).toFixed(2)}%)`}
+          {running && lastStatus && !start && <div style={{ color: '#38bdf8', marginTop: 6 }}>⏳ {lastStatus.message || lastStatus.event}</div>}
+        </div>
+      )}
+
       <div className="grid-4">
-        {/* Epoch */}
-        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', borderRadius: '10px', padding: '16px' }}>
-          <div style={{ fontSize: '11px', color: '#94a3b8' }}>Epoch Progress</div>
-          <div style={{ fontSize: '24px', fontWeight: 800, color: '#f8fafc', fontFamily: 'JetBrains Mono', marginTop: '4px' }}>
-            {trainingState.epoch} / {trainingState.maxEpochs}
-          </div>
-          <div style={{ fontSize: '11px', color: '#64748b', marginTop: '4px' }}>
-            Elapsed: {trainingState.elapsed}
-          </div>
-        </div>
+        <Stat label="Step" value={`${last.step ?? 0} / ${last.max_steps ?? '?'}`} sub={last.epoch !== undefined ? `epoch ${last.epoch.toFixed(2)}` : ''} color="#38bdf8" />
+        <Stat label="Train loss" value={fmtNum(summary?.lossLast)} sub={summary?.lossStart ? `started at ${fmtNum(summary.lossStart)}` : ''} color="#34d399" />
+        <Stat label="Eval loss" value={fmtNum(summary?.evalLoss)} color="#a78bfa" />
+        <Stat label="GPU memory (peak reserved)" value={summary?.gpuPeakGb ? `${summary.gpuPeakGb.toFixed(2)} GB` : '—'} sub={gpu ? `now ${(gpu.memUsedMB / 1024).toFixed(1)} / ${(gpu.memTotalMB / 1024).toFixed(1)} GB · ${gpu.util}% util` : ''} color="#fbbf24" />
+      </div>
 
-        {/* Step Progress */}
-        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', borderRadius: '10px', padding: '16px' }}>
-          <div style={{ fontSize: '11px', color: '#94a3b8' }}>Optimizer Step</div>
-          <div style={{ fontSize: '24px', fontWeight: 800, color: '#06b6d4', fontFamily: 'JetBrains Mono', marginTop: '4px' }}>
-            {step} <span style={{ fontSize: '14px', color: '#64748b' }}>/ 6,000</span>
-          </div>
-          <div style={{ fontSize: '11px', color: '#64748b', marginTop: '4px' }}>
-            {progressPct}% Completed &bull; ETA: {trainingState.eta}
-          </div>
+      <div className="card">
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#94a3b8', marginBottom: 6 }}>
+          <span><Clock size={12} /> elapsed {fmtDuration(elapsed)}{eta ? ` · ETA ${fmtDuration(eta)}` : ''}</span>
+          <span>{pct.toFixed(1)}%</span>
         </div>
-
-        {/* Current Loss */}
-        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', borderRadius: '10px', padding: '16px' }}>
-          <div style={{ fontSize: '11px', color: '#94a3b8' }}>Training Loss (SFT Cross-Entropy)</div>
-          <div style={{ fontSize: '24px', fontWeight: 800, color: '#10b981', fontFamily: 'JetBrains Mono', marginTop: '4px' }}>
-            {loss.toFixed(3)} <span style={{ fontSize: '14px', color: '#10b981' }}>↓</span>
-          </div>
-          <div style={{ fontSize: '11px', color: '#64748b', marginTop: '4px' }}>
-            Eval Loss: {trainingState.evalLoss}
-          </div>
+        <div style={{ height: 8, background: '#1e293b', borderRadius: 4, overflow: 'hidden' }}>
+          <div style={{ width: `${pct}%`, height: '100%', background: 'linear-gradient(90deg,#06b6d4,#8b5cf6)', transition: 'width .5s' }} />
         </div>
+        {summary?.state === 'succeeded' && <div style={{ marginTop: 10, fontSize: 12, color: '#34d399' }}><CheckCircle2 size={13} /> Saved to <code>{summary.output}</code> — it now appears in the Model Library as a “Studio Fine-tune” model.</div>}
+        {['failed', 'interrupted'].includes(summary?.state) && <div style={{ marginTop: 10, fontSize: 12, color: '#f87171' }}><AlertTriangle size={13} /> Run {summary.state}. See the log below.</div>}
+      </div>
 
-        {/* GPU Memory */}
-        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', borderRadius: '10px', padding: '16px' }}>
-          <div style={{ fontSize: '11px', color: '#94a3b8' }}>GPU Memory Allocation</div>
-          <div style={{ fontSize: '24px', fontWeight: 800, color: '#8b5cf6', fontFamily: 'JetBrains Mono', marginTop: '4px' }}>
-            {trainingState.vramUsed} / {trainingState.vramTotal} GB
-          </div>
-          <div style={{ fontSize: '11px', color: '#64748b', marginTop: '4px' }}>
-            RTX 3050 Utilization: {trainingState.gpuUtil}%
-          </div>
+      <div className="grid-2">
+        <div className="card">
+          <div className="card-header"><div className="card-title"><Activity size={15} color="#06b6d4" /><span>Loss</span></div></div>
+          <LineChart series={[{ name: 'train', color: '#22d3ee', points: train }, { name: 'eval', color: '#c084fc', points: evalL }]} xLabel="steps" />
+        </div>
+        <div className="card">
+          <div className="card-header"><div className="card-title"><span>Learning rate (×1e-4) & grad norm</span></div></div>
+          <LineChart series={[{ name: 'lr ×1e-4', color: '#facc15', points: lr }, { name: 'grad norm', color: '#fb7185', points: grad }]} xLabel="steps" />
         </div>
       </div>
 
-      {/* Real-time Loss Graphs & 3D Loss Surface */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '20px' }}>
-        {/* 2D Loss Curve Chart */}
-        <div className="card">
-          <div className="card-header">
-            <div className="card-title">
-              <Activity size={16} color="#06b6d4" />
-              <span>Training Loss & Validation Trajectory</span>
-            </div>
-            <div style={{ display: 'flex', gap: '10px', fontSize: '11px' }}>
-              <span style={{ color: '#06b6d4' }}>● Train Loss</span>
-              <span style={{ color: '#a855f7' }}>● Eval Loss</span>
-            </div>
-          </div>
-
-          {/* SVG Loss Curve */}
-          <div style={{ height: '260px', width: '100%', position: 'relative' }}>
-            <svg viewBox="0 0 500 220" style={{ width: '100%', height: '100%', overflow: 'visible' }}>
-              {/* Grid Lines */}
-              <line x1="40" y1="20" x2="480" y2="20" stroke="rgba(255,255,255,0.05)" />
-              <line x1="40" y1="70" x2="480" y2="70" stroke="rgba(255,255,255,0.05)" />
-              <line x1="40" y1="120" x2="480" y2="120" stroke="rgba(255,255,255,0.05)" />
-              <line x1="40" y1="170" x2="480" y2="170" stroke="rgba(255,255,255,0.05)" />
-
-              {/* Loss Curve Path */}
-              <path
-                d="M 50 40 Q 120 140 220 160 T 360 178 T 460 185"
-                fill="none"
-                stroke="#06b6d4"
-                strokeWidth="3"
-                strokeLinecap="round"
-              />
-              {/* Eval Loss Path */}
-              <path
-                d="M 50 60 Q 120 150 220 170 T 360 182 T 460 190"
-                fill="none"
-                stroke="#8b5cf6"
-                strokeWidth="2"
-                strokeDasharray="4 4"
-              />
-              {/* Current Point Dot */}
-              <circle cx="260" cy="168" r="5" fill="#10b981" />
-            </svg>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#64748b', padding: '0 40px' }}>
-              <span>Step 0 (Loss 2.14)</span>
-              <span>Step 1,500</span>
-              <span>Step 3,000</span>
-              <span>Step 4,500</span>
-              <span>Step 6,000</span>
-            </div>
-          </div>
-
-          <div style={{ marginTop: '12px', display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#94a3b8' }}>
-            <span>Throughput: <strong>1,248 tokens/sec</strong></span>
-            <span>Batch Time: <strong>142 ms / step</strong></span>
-            <span style={{ color: '#10b981' }}>Learning Rate: 2.0e-4 (Cosine Decay)</span>
-          </div>
+      <div className="grid-2">
+        <div className="card" style={{ padding: 12 }}>
+          <div className="card-header"><div className="card-title"><span>Network activity (one signal burst per training step)</span></div></div>
+          {net.data ? <NeuralNetwork3D planes={net.data.planes} height="360px" live={running} pulse={last.step || 0} speed={running ? 1.6 : 0.6} showLabels={false} />
+            : <div style={{ height: 360, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: 12 }}>{net.error || 'Loading…'}</div>}
         </div>
-
-        {/* 3D Loss Landscape Surface */}
-        <div className="card">
-          <div className="card-header">
-            <div className="card-title">
-              <Cpu size={16} color="#8b5cf6" />
-              <span>3D Non-Convex Loss Surface</span>
-            </div>
-            <span className="badge badge-purple">Gradient Descent</span>
-          </div>
-
-          <LossLandscape3D currentStep={step} maxSteps={6000} height="280px" />
-          <div style={{ marginTop: '10px', fontSize: '11px', color: '#94a3b8' }}>
-            💡 <strong>3D Gradient Descent:</strong> The glowing green sphere tracks the active model weights traversing the loss manifold towards the global minimum. Drag to inspect from any angle.
-          </div>
+        <div className="terminal-window">
+          <div className="terminal-header"><span style={{ fontSize: 11, color: '#94a3b8', fontFamily: 'var(--font-mono)' }}>data/runs/{runId}/train.log</span></div>
+          <pre ref={logRef} className="terminal-body" style={{ height: 380, overflow: 'auto', margin: 0, fontSize: 11, whiteSpace: 'pre-wrap' }}>
+            {(log.data?.lines || []).join('\n') || 'No output yet.'}
+          </pre>
         </div>
       </div>
     </div>

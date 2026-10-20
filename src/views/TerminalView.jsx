@@ -1,288 +1,225 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Terminal, Copy, Trash2, Download, Check, Play, ShieldAlert, Cpu } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Terminal as XTerm } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import '@xterm/xterm/css/xterm.css';
+import { Terminal, RotateCcw, Trash2, ShieldAlert, Cpu, Download, Square, CheckCircle2, XCircle } from 'lucide-react';
+import { api, useApi, useJob } from '../api';
+import { JobLog, ErrorBox } from '../components/common/ui';
 
-export default function TerminalView({ 
-  initialLogs = [
-    '$ nvidia-smi',
-    'NVIDIA-SMI 550.163.01   Driver: 550.163.01   CUDA Version: 12.4',
-    'GPU 0: NVIDIA GeForce RTX 3050 Laptop GPU (6144 MiB VRAM) - Temp: 44C - Util: 0%',
-    '',
-    '$ pip install unsloth "xformers<0.0.28" trl peft accelerate bitsandbytes',
-    'Collecting unsloth...',
-    'Installing collected packages: triton, bitsandbytes, peft, trl, unsloth',
-    'Successfully installed unsloth-2024.10 bitsandbytes-0.44.1 trl-0.11.2',
-    '',
-    '$ python -m unsloth.train --model_name "llama-3.2-8b-instruct" --dataset "alpaca_instructions.jsonl"',
-    'Loading base model: llama-3.2-8b-instruct [Safetensors FP16]...',
-    'Applying fast 4-bit QLoRA kernels: LoRA rank=16, alpha=32, target_modules=[q, k, v, o, gate, up, down]',
-    'Unsloth: Enabled fast Triton cross entropy and RoPE embeddings.',
-    'Max memory allocated: 5.12 GB / 6.00 GB (85.3% VRAM). Safe to execute.',
-    'Starting training run [Exp-01]...',
-    'Epoch 1/3 | Step 520/6000 | Loss: 0.853 | Grad Norm: 0.42 | Learning Rate: 1.84e-4',
-    'Epoch 1/3 | Step 521/6000 | Loss: 0.851 | Grad Norm: 0.39 | Throughput: 1,248 tokens/sec'
-  ] 
-}) {
-  const [logs, setLogs] = useState(initialLogs);
-  const [cmdInput, setCmdInput] = useState('');
-  const [activeTab, setActiveTab] = useState('terminal');
-  const [copied, setCopied] = useState(false);
-  const terminalBottomRef = useRef(null);
+const QUICK = [
+  ['nvidia-smi', 'nvidia-smi\r'],
+  ['GPU check (torch)', 'python -c "import torch;print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else \'\')"\r'],
+  ['Unsloth version', 'python -c "import unsloth;print(unsloth.__version__)"\r'],
+  ['pip list (ML)', 'pip list 2>/dev/null | grep -iE "unsloth|torch|transformers|trl|peft|bitsandbytes|xformers|datasets|accelerate"\r'],
+  ['ollama list', 'ollama list\r'],
+];
+
+function LiveTerminal({ visible }) {
+  const hostRef = useRef(null);
+  const termRef = useRef(null);
+  const wsRef = useRef(null);
+  const fitRef = useRef(null);
+  const [status, setStatus] = useState('connecting');
+  const [info, setInfo] = useState(null);
+  const [session, setSession] = useState(0);
 
   useEffect(() => {
-    if (terminalBottomRef.current) {
-      terminalBottomRef.current.scrollIntoView({ behavior: 'smooth' });
+    const term = new XTerm({
+      cursorBlink: true, fontFamily: '"JetBrains Mono", Menlo, monospace', fontSize: 13, scrollback: 10000,
+      theme: { background: '#040711', foreground: '#cbd5e1', cursor: '#38bdf8', selectionBackground: '#1e3a5f' },
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    term.open(hostRef.current);
+    termRef.current = term;
+    fitRef.current = fit;
+    try { fit.fit(); } catch { /* hidden */ }
+
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${proto}://${window.location.host}/ws/terminal?cols=${term.cols}&rows=${term.rows}`);
+    ws.binaryType = 'arraybuffer';
+    wsRef.current = ws;
+    setStatus('connecting');
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === 'string') {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'ready') { setStatus('connected'); setInfo(msg); }
+        if (msg.type === 'exit') { setStatus('exited'); term.write('\r\n\x1b[33m[shell exited — click "New session"]\x1b[0m\r\n'); }
+        return;
+      }
+      term.write(new Uint8Array(ev.data));
+    };
+    ws.onclose = () => setStatus((s) => (s === 'exited' ? s : 'disconnected'));
+    ws.onerror = () => setStatus('disconnected');
+    const sub = term.onData((d) => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'input', data: d })); });
+    const subResize = term.onResize(({ cols, rows }) => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'resize', cols, rows })); });
+    const ro = new ResizeObserver(() => { try { fit.fit(); } catch { /* hidden */ } });
+    ro.observe(hostRef.current);
+
+    return () => { ro.disconnect(); sub.dispose(); subResize.dispose(); ws.close(); term.dispose(); };
+  }, [session]);
+
+  useEffect(() => {
+    if (visible && fitRef.current) {
+      setTimeout(() => { try { fitRef.current.fit(); termRef.current.focus(); } catch { /* ignore */ } }, 30);
     }
-  }, [logs]);
+  }, [visible]);
 
-  const handleCommandSubmit = (e) => {
-    e.preventDefault();
-    if (!cmdInput.trim()) return;
-
-    const trimmed = cmdInput.trim();
-    const newLogs = [...logs, `$ ${trimmed}`];
-
-    if (trimmed === 'clear') {
-      setLogs([]);
-      setCmdInput('');
-      return;
-    } else if (trimmed === 'help') {
-      newLogs.push(
-        'AI Model Studio Integrated Terminal CLI Commands:',
-        '  nvidia-smi   - Query local NVIDIA GPU hardware & VRAM allocation',
-        '  status       - Show active model, dataset, and training progress',
-        '  doctor       - Run environment and dependency compatibility verification',
-        '  clear        - Clear console output',
-        '  help         - Display this help manual'
-      );
-    } else if (trimmed === 'nvidia-smi') {
-      newLogs.push(
-        '+-----------------------------------------------------------------------------------------+',
-        '| NVIDIA-SMI 550.163.01     Driver Version: 550.163.01     CUDA Version: 12.4             |',
-        '| GPU  Name                 Temp  Memory-Usage       GPU-Util  Compute M.                 |',
-        '|   0  NVIDIA RTX 3050 ...   44C   5242MiB / 6144MiB    68%      Default                  |',
-        '+-----------------------------------------------------------------------------------------+'
-      );
-    } else if (trimmed === 'status') {
-      newLogs.push(
-        'AI Studio Engine Status:',
-        '  Active Model : Llama 3.2 8B Instruct (Safetensors FP16)',
-        '  Fine-Tuning  : Step 521 / 6,000 | Loss: 0.851 | ETA: 2h 10m',
-        '  VRAM Memory  : 5.1 / 6.0 GB Used (Safe)'
-      );
-    } else if (trimmed === 'doctor') {
-      newLogs.push(
-        'Checking environment compatibility:',
-        '  [✓] Linux Kernel 6.8 & POSIX PTY OK',
-        '  [✓] Python 3.13 Runtime OK',
-        '  [✓] NVIDIA Driver 550.163 & CUDA 12.4 Detected',
-        '  [✓] Unsloth / Triton JIT acceleration ready',
-        'Environment integrity score: 100% (No missing dependencies)'
-      );
-    } else {
-      newLogs.push(`Executing: ${trimmed}... Completed with exit code 0.`);
-    }
-
-    setLogs(newLogs);
-    setCmdInput('');
+  const send = (text) => {
+    if (wsRef.current?.readyState === 1) wsRef.current.send(JSON.stringify({ type: 'input', data: text }));
+    termRef.current?.focus();
   };
-
-  const handleCopyLogs = () => {
-    navigator.clipboard.writeText(logs.join('\n'));
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const handleDownloadLogs = () => {
-    const element = document.createElement('a');
-    const file = new Blob([logs.join('\n')], { type: 'text/plain' });
-    element.href = URL.createObjectURL(file);
-    element.download = `ai_studio_terminal_${Date.now()}.log`;
-    document.body.appendChild(element);
-    element.click();
-  };
+  const color = status === 'connected' ? 'badge-emerald' : status === 'connecting' ? 'badge-amber' : 'badge-rose';
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-      {/* Top Header */}
-      <div className="card" style={{ padding: '16px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '14px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <div style={{ width: '38px', height: '38px', borderRadius: '8px', background: 'rgba(6, 182, 212, 0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Terminal size={18} color="#06b6d4" />
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        {QUICK.map(([label, cmd]) => (
+          <button key={label} className="btn btn-secondary" style={{ fontSize: 11, padding: '4px 10px' }} onClick={() => send(cmd)}>{label}</button>
+        ))}
+      </div>
+      <div className="terminal-window">
+        <div className="terminal-header">
+          <div className="terminal-dots">
+            <span className="terminal-dot" style={{ background: '#f43f5e' }}></span>
+            <span className="terminal-dot" style={{ background: '#f59e0b' }}></span>
+            <span className="terminal-dot" style={{ background: '#10b981' }}></span>
           </div>
-          <div>
-            <h2 style={{ fontSize: '18px', fontWeight: 700, color: '#f8fafc' }}>
-              Real-Time Linux Terminal & Subprocess Stream
-            </h2>
-            <p style={{ fontSize: '12px', color: '#94a3b8' }}>
-              Direct standard output / error streaming with PTY process supervision and human-in-the-loop audit logs
-            </p>
+          <span style={{ fontSize: 11, color: '#64748b', fontFamily: 'var(--font-mono)' }}>
+            {info ? `${info.shell} — PID ${info.pid} — studio Python env on PATH` : 'starting shell…'}
+          </span>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <span className={`badge ${color}`} style={{ fontSize: 10 }}>{status}</span>
+            <button className="btn-icon" title="Clear screen" onClick={() => termRef.current?.clear()}><Trash2 size={13} /></button>
+            <button className="btn-icon" title="New session" onClick={() => setSession((s) => s + 1)}><RotateCcw size={13} /></button>
           </div>
         </div>
+        <div ref={hostRef} style={{ height: 520, padding: '6px 4px', background: '#040711' }} />
+      </div>
+      {status === 'disconnected' && (
+        <ErrorBox>Could not connect to the backend shell. Start the backend with <code>./scripts/start.sh</code> (or <code>python -m server</code>) and click “New session”.</ErrorBox>
+      )}
+    </div>
+  );
+}
 
-        {/* Toolbar buttons */}
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <button className="btn btn-secondary" onClick={handleCopyLogs} title="Copy all logs">
-            {copied ? <Check size={14} color="#10b981" /> : <Copy size={14} />}
-            <span>{copied ? 'Copied' : 'Copy Logs'}</span>
-          </button>
-          <button className="btn btn-secondary" onClick={handleDownloadLogs} title="Export log file">
-            <Download size={14} />
-            <span>Export .log</span>
-          </button>
-          <button className="btn btn-secondary" onClick={() => setLogs([])} title="Clear terminal">
-            <Trash2 size={14} />
-            <span>Clear</span>
-          </button>
+function JobsPanel() {
+  const { data, error, reload } = useApi('/api/jobs', 2000);
+  const [open, setOpen] = useState(null);
+  const job = useJob(open);
+  const jobs = data?.jobs || [];
+  return (
+    <div className="card">
+      <div className="card-header">
+        <div className="card-title"><ShieldAlert size={16} color="#06b6d4" /><span>Processes started by the Studio (this session)</span></div>
+        <button className="btn btn-secondary" style={{ fontSize: 11 }} onClick={reload}>Refresh</button>
+      </div>
+      <ErrorBox>{error}</ErrorBox>
+      {!jobs.length && <div style={{ fontSize: 12, color: '#64748b' }}>No installs, downloads, training runs or exports have been started yet.</div>}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {jobs.map((j) => (
+          <div key={j.id} style={{ padding: 10, background: '#090e1a', borderRadius: 6, border: '1px solid rgba(255,255,255,0.06)', cursor: 'pointer' }}
+            onClick={() => setOpen(open === j.id ? null : j.id)}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#94a3b8' }}>
+              <span>{new Date(j.started * 1000).toLocaleString()} · {j.kind}</span>
+              <span style={{ color: j.status === 'succeeded' ? '#10b981' : j.status === 'running' ? '#38bdf8' : '#f87171' }}>
+                {j.status}{j.returncode !== null ? ` · exit ${j.returncode}` : ''}
+              </span>
+            </div>
+            <div style={{ color: '#38bdf8', marginTop: 4, fontFamily: 'var(--font-mono)', fontSize: 11.5, wordBreak: 'break-all' }}>$ {j.command}</div>
+            {j.status === 'running' && (
+              <button className="btn btn-danger" style={{ marginTop: 6, fontSize: 11, padding: '3px 10px' }}
+                onClick={(e) => { e.stopPropagation(); api(`/api/jobs/${j.id}/stop`, { method: 'POST' }).then(reload); }}>
+                <Square size={11} /> Stop
+              </button>
+            )}
+            {open === j.id && <JobLog job={job} height={300} />}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Doctor({ env, onEnvChanged }) {
+  const install = env?.install;
+  const job = useJob(install ? install.id : null);
+  const [err, setErr] = useState(null);
+  if (!env) return <div className="card" style={{ fontSize: 12, color: '#94a3b8' }}>Waiting for backend…</div>;
+  const row = (name, v, required = true) => (
+    <div key={name} style={{ padding: '8px 12px', background: '#090e1a', borderRadius: 6, border: '1px solid rgba(255,255,255,0.05)', display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+      <span style={{ display: 'flex', gap: 6, alignItems: 'center', color: '#e2e8f0' }}>
+        {v ? <CheckCircle2 size={13} color="#10b981" /> : <XCircle size={13} color={required ? '#f87171' : '#64748b'} />}{name}
+      </span>
+      <span style={{ fontFamily: 'var(--font-mono)', color: v ? '#94a3b8' : '#64748b' }}>{v || 'not installed'}</span>
+    </div>
+  );
+  const startInstall = async () => {
+    setErr(null);
+    try { await api('/api/env/install', { method: 'POST' }); onEnvChanged(); } catch (e) { setErr(e.message); }
+  };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div className="card">
+        <div className="card-header">
+          <div className="card-title"><Cpu size={16} color="#10b981" /><span>Runtime</span></div>
+          <span className={`badge ${env.unslothReady ? 'badge-emerald' : 'badge-amber'}`}>{env.unslothReady ? 'Unsloth installed' : 'Unsloth missing'}</span>
         </div>
+        <div className="grid-2" style={{ fontSize: 12, gap: 8 }}>
+          {row('Python', `${env.pythonVersion} ${env.virtualenv ? '(venv)' : ''}`)}
+          {row('Interpreter', env.python)}
+          {row('NVIDIA GPU', env.gpu ? `CUDA ${env.cuda || '?'}` : null)}
+          {row('Ollama', env.ollama.installed ? (env.ollama.running ? `running v${env.ollama.version}` : 'installed (not running — `ollama serve`)') : null, false)}
+        </div>
+        {!env.gpu && (
+          <div style={{ marginTop: 10, fontSize: 12, color: '#fbbf24' }}>
+            No NVIDIA GPU detected via nvidia-smi. Unsloth training requires an NVIDIA GPU (CUDA); model inspection, tokenizer, datasets and Ollama chat still work.
+          </div>
+        )}
       </div>
 
-      {/* Terminal Tabs */}
-      <div className="tabs-header" style={{ marginBottom: '0' }}>
-        <button 
-          className={`tab-btn ${activeTab === 'terminal' ? 'active' : ''}`}
-          onClick={() => setActiveTab('terminal')}
-        >
-          Live PTY Terminal
-        </button>
-        <button 
-          className={`tab-btn ${activeTab === 'history' ? 'active' : ''}`}
-          onClick={() => setActiveTab('history')}
-        >
-          Command Audit History
-        </button>
-        <button 
-          className={`tab-btn ${activeTab === 'doctor' ? 'active' : ''}`}
-          onClick={() => setActiveTab('doctor')}
-        >
-          Environment Doctor
-        </button>
+      <div className="card">
+        <div className="card-header">
+          <div className="card-title"><Download size={16} color="#8b5cf6" /><span>Unsloth training stack</span></div>
+          <button className="btn btn-primary" disabled={install?.status === 'running'} onClick={startInstall}>
+            {install?.status === 'running' ? 'Installing…' : env.unslothReady ? 'Update / reinstall' : 'Install now'}
+          </button>
+        </div>
+        <p style={{ fontSize: 12, color: '#94a3b8', marginBottom: 10 }}>
+          Installed automatically when the backend starts and Unsloth is missing (disable with <code>AI_STUDIO_AUTO_INSTALL=0</code>). Command:
+        </p>
+        <pre style={{ fontFamily: 'var(--font-mono)', fontSize: 11.5, color: '#38bdf8', background: '#040711', padding: 10, borderRadius: 6, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{env.installCommand}</pre>
+        <ErrorBox>{err}</ErrorBox>
+        <div className="grid-3" style={{ gap: 8, marginTop: 12 }}>
+          {Object.entries(env.packages).map(([k, v]) => row(k, v))}
+          {Object.entries(env.optional).map(([k, v]) => row(`${k} (optional)`, v, false))}
+        </div>
+        {job && <JobLog job={job} height={320} />}
       </div>
+    </div>
+  );
+}
 
-      {/* Live Terminal Window */}
-      {activeTab === 'terminal' && (
-        <div className="terminal-window" style={{ minHeight: '520px', flex: 1 }}>
-          <div className="terminal-header">
-            <div className="terminal-dots">
-              <span className="terminal-dot" style={{ background: '#f43f5e' }}></span>
-              <span className="terminal-dot" style={{ background: '#f59e0b' }}></span>
-              <span className="terminal-dot" style={{ background: '#10b981' }}></span>
-            </div>
-            <span style={{ fontSize: '11px', color: '#64748b', fontFamily: 'JetBrains Mono' }}>
-              bash — pts/2 &bull; 80x24 &bull; PID 28419 (Unsloth Subprocess)
-            </span>
-            <span className="badge badge-emerald" style={{ fontSize: '10px' }}>Active</span>
-          </div>
-
-          {/* Terminal Output Body */}
-          <div className="terminal-body" style={{ flex: 1, maxHeight: '440px', overflowY: 'auto' }}>
-            {logs.map((line, idx) => {
-              const isCommand = line.startsWith('$');
-              const isSuccess = line.includes('Successfully') || line.includes('[✓]');
-              const isWarning = line.includes('Warning') || line.includes('OOM');
-
-              return (
-                <div 
-                  key={idx} 
-                  style={{
-                    color: isCommand ? '#38bdf8' : isSuccess ? '#34d399' : isWarning ? '#fbbf24' : '#cbd5e1',
-                    fontWeight: isCommand ? 600 : 400,
-                    marginBottom: '2px',
-                    fontFamily: 'JetBrains Mono, monospace',
-                    fontSize: '12px'
-                  }}
-                >
-                  {line}
-                </div>
-              );
-            })}
-            <div ref={terminalBottomRef} />
-          </div>
-
-          {/* Interactive Input Row */}
-          <form className="terminal-input-row" onSubmit={handleCommandSubmit}>
-            <span className="terminal-prompt" style={{ fontFamily: 'JetBrains Mono', fontSize: '13px' }}>
-              ai-studio@linux:~$
-            </span>
-            <input 
-              type="text" 
-              className="terminal-input"
-              value={cmdInput}
-              onChange={(e) => setCmdInput(e.target.value)}
-              placeholder="Type command (e.g. nvidia-smi, status, doctor, help)..."
-              autoFocus
-            />
-          </form>
+export default function TerminalView({ visible, tab = 'terminal', onTabChange, env, onEnvChanged }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div className="card" style={{ padding: '16px 20px', display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ width: 38, height: 38, borderRadius: 8, background: 'rgba(6,182,212,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Terminal size={18} color="#06b6d4" />
         </div>
-      )}
-
-      {/* Audit History Tab */}
-      {activeTab === 'history' && (
-        <div className="card">
-          <div className="card-header">
-            <div className="card-title">
-              <ShieldAlert size={16} color="#06b6d4" />
-              <span>Human-in-the-Loop Approved Command History</span>
-            </div>
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '12px', fontFamily: 'JetBrains Mono' }}>
-            <div style={{ padding: '10px', background: '#090e1a', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.06)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '10px' }}>
-                <span>Timestamp: 2026-10-20 09:11:15</span>
-                <span style={{ color: '#10b981' }}>Approved &bull; Exit 0</span>
-              </div>
-              <div style={{ color: '#38bdf8', marginTop: '4px' }}>
-                $ pip install unsloth "xformers&lt;0.0.28" trl peft accelerate bitsandbytes
-              </div>
-            </div>
-
-            <div style={{ padding: '10px', background: '#090e1a', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.06)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8', fontSize: '10px' }}>
-                <span>Timestamp: 2026-10-20 09:14:02</span>
-                <span style={{ color: '#10b981' }}>Approved &bull; Running</span>
-              </div>
-              <div style={{ color: '#38bdf8', marginTop: '4px' }}>
-                $ python -m unsloth.train --model_name "llama-3.2-8b-instruct" --dataset "alpaca_instructions.jsonl" --lora_r 16
-              </div>
-            </div>
-          </div>
+        <div>
+          <h2 style={{ fontSize: 18, fontWeight: 700, color: '#f8fafc' }}>Integrated Linux Terminal</h2>
+          <p style={{ fontSize: 12, color: '#94a3b8' }}>A real interactive shell (PTY) on this machine. <code>python</code>/<code>pip</code> point at the Studio's environment, so anything you install here is available to training.</p>
         </div>
-      )}
-
-      {/* Doctor Tab */}
-      {activeTab === 'doctor' && (
-        <div className="card">
-          <div className="card-header">
-            <div className="card-title">
-              <Cpu size={16} color="#10b981" />
-              <span>System & Dependency Diagnostics</span>
-            </div>
-            <span className="badge badge-emerald">All Checks Passed</span>
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px', fontSize: '12px' }}>
-            <div style={{ padding: '12px', background: '#090e1a', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.05)' }}>
-              <div style={{ color: '#10b981', fontWeight: 600 }}>✓ NVIDIA CUDA Driver 550.163</div>
-              <div style={{ color: '#94a3b8', fontSize: '11px', marginTop: '2px' }}>CUDA 12.4 Runtime & Pynvml telemetry accessible.</div>
-            </div>
-
-            <div style={{ padding: '12px', background: '#090e1a', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.05)' }}>
-              <div style={{ color: '#10b981', fontWeight: 600 }}>✓ FlashAttention-2 / SDPA</div>
-              <div style={{ color: '#94a3b8', fontSize: '11px', marginTop: '2px' }}>PyTorch native SDPA kernel enabled for RTX 3050.</div>
-            </div>
-
-            <div style={{ padding: '12px', background: '#090e1a', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.05)' }}>
-              <div style={{ color: '#10b981', fontWeight: 600 }}>✓ BitsAndBytes 4-bit Engine</div>
-              <div style={{ color: '#94a3b8', fontSize: '11px', marginTop: '2px' }}>NF4 double quantization operational for QLoRA.</div>
-            </div>
-
-            <div style={{ padding: '12px', background: '#090e1a', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.05)' }}>
-              <div style={{ color: '#10b981', fontWeight: 600 }}>✓ POSIX PTY Supervisor</div>
-              <div style={{ color: '#94a3b8', fontSize: '11px', marginTop: '2px' }}>Safe process groups (setsid) and SIGTERM cleanup active.</div>
-            </div>
-          </div>
-        </div>
-      )}
+      </div>
+      <div className="tabs-header" style={{ marginBottom: 0 }}>
+        {[['terminal', 'Live Terminal'], ['history', 'Process History'], ['doctor', 'Environment & Unsloth']].map(([id, label]) => (
+          <button key={id} className={`tab-btn ${tab === id ? 'active' : ''}`} onClick={() => onTabChange(id)}>{label}</button>
+        ))}
+      </div>
+      <div style={{ display: tab === 'terminal' ? 'block' : 'none' }}><LiveTerminal visible={visible && tab === 'terminal'} /></div>
+      {tab === 'history' && <JobsPanel />}
+      {tab === 'doctor' && <Doctor env={env} onEnvChanged={onEnvChanged} />}
     </div>
   );
 }

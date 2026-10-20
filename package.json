@@ -7,9 +7,14 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "server": "bash -c 'if [ -x .venv/bin/python ]; then exec .venv/bin/python -m server; else exec python3 -m server; fi'",
+    "start": "./scripts/start.sh",
+    "setup": "./scripts/setup.sh"
   },
   "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "lucide-react": "^1.59.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",

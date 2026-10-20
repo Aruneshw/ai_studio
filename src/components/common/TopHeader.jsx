@@ -1,15 +1,16 @@
 import React from 'react';
-import { ShieldCheck, BookOpen, Bell, Terminal, RefreshCw } from 'lucide-react';
+import { Terminal, Wrench } from 'lucide-react';
 
-export default function TopHeader({ 
-  currentScreenTitle, 
-  currentScreenSubtitle, 
-  activeModel, 
-  models = [], 
-  onSelectModel,
-  onOpenTerminal,
-  onOpenDocs
-}) {
+export default function TopHeader({ currentScreenTitle, currentScreenSubtitle, activeModel, models = [], onSelectModel,
+  onOpenTerminal, onOpenEnv, system, env, backendError }) {
+  const gpu = system?.gpus?.[0];
+  const install = env?.install;
+  let envChip;
+  if (!env) envChip = { text: backendError ? 'Backend offline' : 'Checking…', color: '#f87171' };
+  else if (env.unslothReady) envChip = { text: `Unsloth ${env.packages.unsloth}`, color: '#34d399' };
+  else if (install?.status === 'running') envChip = { text: 'Installing Unsloth…', color: '#fbbf24' };
+  else envChip = { text: 'Unsloth not installed', color: '#f87171' };
+
   return (
     <header className="top-header">
       <div className="header-left">
@@ -17,48 +18,25 @@ export default function TopHeader({
           <h1 className="screen-title">{currentScreenTitle}</h1>
           <span className="screen-subtitle">{currentScreenSubtitle}</span>
         </div>
-
-        {/* Model Quick Selector */}
-        <select 
-          className="model-quick-selector"
-          value={activeModel.id}
-          onChange={(e) => {
-            const found = models.find(m => m.id === e.target.value);
-            if (found) onSelectModel(found);
-          }}
-        >
-          {models.map(m => (
-            <option key={m.id} value={m.id}>
-              {m.avatar} {m.name} ({m.parameterCount})
-            </option>
-          ))}
-        </select>
+        {models.length > 0 && (
+          <select className="model-quick-selector" value={activeModel?.id || ''}
+            onChange={(e) => { const m = models.find((x) => x.id === e.target.value); if (m) onSelectModel(m); }}>
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>{m.avatar} {m.name} ({m.paramsLabel} · {m.source})</option>
+            ))}
+          </select>
+        )}
       </div>
 
       <div className="header-right">
-        {/* GPU VRAM Hardware Pill */}
+        <button className="status-chip" onClick={onOpenEnv} title="Environment & package status" style={{ cursor: 'pointer', color: envChip.color }}>
+          <Wrench size={12} /> <span>{envChip.text}</span>
+        </button>
         <div className="status-chip">
-          <span className="pulse-dot"></span>
-          <span>CUDA: RTX 3050 (44°C)</span>
+          <span className="pulse-dot" style={gpu ? undefined : { background: '#64748b', boxShadow: 'none' }}></span>
+          <span>{gpu ? `CUDA: ${gpu.name.replace('NVIDIA ', '')} (${gpu.temp ?? '?'}°C)` : 'CPU only'}</span>
         </div>
-
-        {/* Terminal Quick Button */}
-        <button 
-          className="btn-icon" 
-          onClick={onOpenTerminal} 
-          title="Open Integrated Linux Terminal"
-        >
-          <Terminal size={16} />
-        </button>
-
-        {/* Master Plan Architecture Doc */}
-        <button 
-          className="btn-icon" 
-          onClick={onOpenDocs} 
-          title="Open Master Technical Architecture Specification"
-        >
-          <BookOpen size={16} />
-        </button>
+        <button className="btn-icon" onClick={onOpenTerminal} title="Open integrated terminal"><Terminal size={16} /></button>
       </div>
     </header>
   );

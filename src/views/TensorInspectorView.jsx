@@ -1,209 +1,94 @@
-import React, { useState } from 'react';
-import TensorElevationSurface3D from '../components/3d/TensorElevationSurface3D';
-import { TENSORS_DATA } from '../data/mockModels';
-import { Sliders, BarChart2, Activity, Database, Check, Layers, Sparkles } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import TensorSurface3D from '../components/3d/TensorSurface3D';
+import { Sliders } from 'lucide-react';
+import { useApi, fmtNum } from '../api';
+import { NoModel, ErrorBox, Histogram, Heatmap, Stat } from '../components/common/ui';
 
-export default function TensorInspectorView({ selectedTensorKey = 'model.layers.12.self_attn.q_proj.weight' }) {
-  const [currentKey, setCurrentKey] = useState(selectedTensorKey);
-  const [activeTab, setActiveTab] = useState('3d_surface');
-  const [gridRes, setGridRes] = useState(36);
+export default function TensorInspectorView({ activeModel: m, selectedTensor, onSelectTensor, onNavigate }) {
+  const [view, setView] = useState('surface');
+  const [res, setRes] = useState(48);
+  const [q, setQ] = useState('');
+  const list = useApi(m?.capabilities.tensors ? `/api/models/${m.id}/tensors` : null);
+  const tensors = useMemo(() => list.data?.tensors || [], [list.data]);
+  const name = tensors.some((t) => t.name === selectedTensor) ? selectedTensor
+    : (tensors.find((t) => t.shape.length >= 2 && t.supported && t.layer !== null) || tensors[0])?.name;
+  const d = useApi(name ? `/api/models/${m.id}/tensor?name=${encodeURIComponent(name)}&grid=${res}` : null);
 
-  const tensor = TENSORS_DATA[currentKey] || TENSORS_DATA['model.layers.12.self_attn.q_proj.weight'];
+  if (!m) return <NoModel onNavigate={onNavigate} />;
+  if (!m.capabilities.tensors) return <ErrorBox>This model's weights can't be read.</ErrorBox>;
+  const t = d.data;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-      {/* Top Tensor Header */}
-      <div className="card" style={{ padding: '18px 24px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div className="card" style={{ padding: '16px 20px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span className="badge badge-cyan">{tensor.dtype}</span>
-              <span className="badge badge-purple">{tensor.parameters.toLocaleString()} Parameters</span>
-              <span className="badge badge-emerald">FP16 Checked</span>
-            </div>
-            <h2 style={{ fontSize: '18px', fontWeight: 700, color: '#f8fafc', fontFamily: 'JetBrains Mono, monospace', marginTop: '6px' }}>
-              {tensor.name}
-            </h2>
-            <p style={{ fontSize: '12px', color: '#94a3b8', marginTop: '2px' }}>
-              {tensor.module} &bull; Dimensions: [{tensor.shape.join(' × ')}]
-            </p>
+            <h2 style={{ fontSize: 16, fontWeight: 700, color: '#f8fafc' }}>Tensor Inspector</h2>
+            <div style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: '#38bdf8' }}>{name || '—'}</div>
           </div>
-
-          {/* Tensor Dropdown Switcher */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <span style={{ fontSize: '12px', color: '#94a3b8' }}>Select Tensor:</span>
-            <select 
-              className="select" 
-              style={{ width: '280px', fontFamily: 'JetBrains Mono', fontSize: '11.5px' }}
-              value={currentKey}
-              onChange={(e) => setCurrentKey(e.target.value)}
-            >
-              {Object.keys(TENSORS_DATA).map(key => (
-                <option key={key} value={key}>{key.split('.').slice(-2).join('.')}</option>
-              ))}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input className="input" style={{ width: 220 }} placeholder="filter…" value={q} onChange={(e) => setQ(e.target.value)} />
+            <select className="input" style={{ width: 420, fontFamily: 'var(--font-mono)', fontSize: 11.5 }} value={name || ''} onChange={(e) => onSelectTensor(e.target.value)}>
+              {tensors.filter((x) => x.name.includes(q)).slice(0, 3000).map((x) => <option key={x.name} value={x.name}>{x.name} [{x.shape.join('×')}] {x.dtype}</option>)}
             </select>
           </div>
         </div>
       </div>
+      <ErrorBox>{list.error || d.error || t?.error}</ErrorBox>
 
-      {/* Numerical Statistics Row */}
-      <div className="grid-4">
-        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', borderRadius: '10px', padding: '14px' }}>
-          <div style={{ fontSize: '11px', color: '#94a3b8' }}>Tensor Shape</div>
-          <div style={{ fontSize: '16px', fontWeight: 700, color: '#38bdf8', fontFamily: 'JetBrains Mono', marginTop: '4px' }}>
-            [{tensor.shape.join(', ')}]
+      {t && (
+        <div className="grid-4">
+          <Stat label="Shape" value={`[${t.shape.join(', ')}]`} color="#38bdf8" />
+          <Stat label="Data type" value={t.dtype} sub={t.nbytes ? `${(t.nbytes / 1048576).toFixed(2)} MB on disk` : ''} />
+          <Stat label="Parameters" value={t.numel.toLocaleString()} />
+          <Stat label="Sampling" value={t.sampled ? `${t.sampledRows} rows` : 'full tensor'} sub={t.sampled ? 'evenly spaced rows' : ''} />
+        </div>
+      )}
+
+      {t?.stats && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 20 }}>
+          <div className="card" style={{ padding: 12 }}>
+            <div className="tabs-header" style={{ marginBottom: 10 }}>
+              {[['surface', '3D surface'], ['heatmap', 'Heatmap'], ['hist', 'Histogram'], ['raw', 'Raw values']].map(([id, l]) => (
+                <button key={id} className={`tab-btn ${view === id ? 'active' : ''}`} onClick={() => setView(id)}>{l}</button>
+              ))}
+              <label style={{ marginLeft: 'auto', fontSize: 11, color: '#94a3b8' }}>Resolution&nbsp;
+                <select className="input" style={{ width: 70, display: 'inline-block' }} value={res} onChange={(e) => setRes(+e.target.value)}>
+                  {[24, 32, 48, 64, 96].map((n) => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </label>
+            </div>
+            {view === 'surface' && <TensorSurface3D grid={t.grid} height="460px" title={`${t.grid.length}×${t.grid[0].length} block means`} />}
+            {view === 'heatmap' && <Heatmap grid={t.grid} height={460} />}
+            {view === 'hist' && <div style={{ padding: 10 }}><Histogram counts={t.histogram.counts} edges={t.histogram.edges} height={360} /></div>}
+            {view === 'raw' && (
+              <div style={{ overflow: 'auto' }}>
+                <table style={{ fontFamily: 'var(--font-mono)', fontSize: 11, borderCollapse: 'collapse' }}>
+                  <tbody>
+                    {t.raw.values.map((row, i) => (
+                      <tr key={i}>
+                        <td style={{ color: '#64748b', paddingRight: 10 }}>row {t.raw.rowIndices[i]}</td>
+                        {row.map((v, j) => <td key={j} style={{ padding: '3px 8px', color: v >= 0 ? '#f9a8d4' : '#7dd3fc' }}>{v.toFixed(5)}</td>)}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div style={{ fontSize: 11, color: '#64748b', marginTop: 8 }}>First 12 columns of the first sampled rows (dequantized to float32).</div>
+              </div>
+            )}
+          </div>
+          <div className="card">
+            <div className="card-header"><div className="card-title"><Sliders size={15} color="#06b6d4" /><span>Statistics</span></div></div>
+            {[['Mean', t.stats.mean], ['Std dev', t.stats.std], ['Min', t.stats.min], ['Max', t.stats.max], ['Mean |w|', t.stats.absMean],
+              ['Near-zero (|w|<1e-3)', `${(t.stats.nearZero * 100).toFixed(2)}%`], ['Mean row L2 norm', t.stats.l2PerRow]].map(([k, v]) => (
+              <div key={k} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, padding: '6px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                <span style={{ color: '#94a3b8' }}>{k}</span><span style={{ fontFamily: 'var(--font-mono)' }}>{typeof v === 'number' ? fmtNum(v, 5) : v}</span>
+              </div>
+            ))}
+            <div style={{ marginTop: 14 }}><Histogram counts={t.histogram.counts} edges={t.histogram.edges} height={90} /></div>
           </div>
         </div>
-
-        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', borderRadius: '10px', padding: '14px' }}>
-          <div style={{ fontSize: '11px', color: '#94a3b8' }}>Mean (μ)</div>
-          <div style={{ fontSize: '16px', fontWeight: 700, color: '#f8fafc', fontFamily: 'JetBrains Mono', marginTop: '4px' }}>
-            {tensor.mean}
-          </div>
-        </div>
-
-        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', borderRadius: '10px', padding: '14px' }}>
-          <div style={{ fontSize: '11px', color: '#94a3b8' }}>Standard Deviation (σ)</div>
-          <div style={{ fontSize: '16px', fontWeight: 700, color: '#8b5cf6', fontFamily: 'JetBrains Mono', marginTop: '4px' }}>
-            {tensor.stdDev}
-          </div>
-        </div>
-
-        <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border-subtle)', borderRadius: '10px', padding: '14px' }}>
-          <div style={{ fontSize: '11px', color: '#94a3b8' }}>Range [Min, Max]</div>
-          <div style={{ fontSize: '16px', fontWeight: 700, color: '#10b981', fontFamily: 'JetBrains Mono', marginTop: '4px' }}>
-            [{tensor.min}, +{tensor.max}]
-          </div>
-        </div>
-      </div>
-
-      {/* Main Inspection View Tabs */}
-      <div className="card" style={{ padding: '20px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-subtle)', paddingBottom: '12px', marginBottom: '16px' }}>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <button 
-              className={`tab-btn ${activeTab === '3d_surface' ? 'active' : ''}`}
-              onClick={() => setActiveTab('3d_surface')}
-            >
-              <Sparkles size={14} style={{ display: 'inline', marginRight: '6px' }} />
-              Live 3D Surface Heatmap
-            </button>
-            <button 
-              className={`tab-btn ${activeTab === '2d_density' ? 'active' : ''}`}
-              onClick={() => setActiveTab('2d_density')}
-            >
-              2D Matrix Density
-            </button>
-            <button 
-              className={`tab-btn ${activeTab === 'histogram' ? 'active' : ''}`}
-              onClick={() => setActiveTab('histogram')}
-            >
-              Weight Histogram
-            </button>
-          </div>
-
-          {activeTab === '3d_surface' && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '11px', color: '#94a3b8' }}>
-              <span>Sampling Density:</span>
-              <button 
-                className={`btn btn-secondary ${gridRes === 24 ? 'btn-outline-cyan' : ''}`} 
-                style={{ padding: '2px 8px', fontSize: '10px' }}
-                onClick={() => setGridRes(24)}
-              >
-                24×24
-              </button>
-              <button 
-                className={`btn btn-secondary ${gridRes === 36 ? 'btn-outline-cyan' : ''}`} 
-                style={{ padding: '2px 8px', fontSize: '10px' }}
-                onClick={() => setGridRes(36)}
-              >
-                36×36
-              </button>
-              <button 
-                className={`btn btn-secondary ${gridRes === 48 ? 'btn-outline-cyan' : ''}`} 
-                style={{ padding: '2px 8px', fontSize: '10px' }}
-                onClick={() => setGridRes(48)}
-              >
-                48×48
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* 3D Surface Heatmap View */}
-        {activeTab === '3d_surface' && (
-          <div>
-            <TensorElevationSurface3D 
-              tensorName={tensor.name}
-              gridResolution={gridRes}
-              height="440px"
-              elevationScale={2.0}
-            />
-            <div style={{ marginTop: '12px', display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#94a3b8' }}>
-              <span>💡 <strong>3D Surface Inspection:</strong> Vertices are elevated proportionally to FP16 numerical weight values. Drag to rotate in 3D.</span>
-              <span style={{ color: '#06b6d4', fontFamily: 'JetBrains Mono' }}>WebGL Jet/Spectral Colormap Shader</span>
-            </div>
-          </div>
-        )}
-
-        {/* 2D Density Heatmap View */}
-        {activeTab === '2d_density' && (
-          <div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(16, 1fr)', gap: '4px', height: '340px', padding: '12px', background: '#040711', borderRadius: '8px' }}>
-              {Array.from({ length: 256 }).map((_, idx) => {
-                const norm = Math.sin(idx * 0.4) * 0.5 + 0.5;
-                const r = Math.round(norm * 255);
-                const b = Math.round((1 - norm) * 255);
-                return (
-                  <div 
-                    key={idx} 
-                    style={{ 
-                      borderRadius: '2px', 
-                      background: `rgb(${r}, 80, ${b})`,
-                      cursor: 'pointer' 
-                    }} 
-                    title={`Index [${Math.floor(idx / 16)}, ${idx % 16}]: ${(norm * 0.8 - 0.4).toFixed(4)}`}
-                  />
-                );
-              })}
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '10px', fontSize: '11px', color: '#94a3b8' }}>
-              <span>Slice [0:256, 0:256]</span>
-              <span>Total Matrix Area: 16,777,216 elements</span>
-            </div>
-          </div>
-        )}
-
-        {/* Weight Histogram View */}
-        {activeTab === 'histogram' && (
-          <div style={{ padding: '20px 0' }}>
-            <div style={{ display: 'flex', alignItems: 'flex-end', gap: '4px', height: '240px', paddingBottom: '12px', borderBottom: '1px solid var(--border-subtle)' }}>
-              {Array.from({ length: 40 }).map((_, idx) => {
-                // Bell curve standard normal distribution
-                const x = (idx - 20) / 6;
-                const heightPct = Math.exp(-0.5 * x * x) * 95;
-                return (
-                  <div 
-                    key={idx} 
-                    style={{ 
-                      flex: 1, 
-                      height: `${heightPct}%`, 
-                      background: idx < 12 ? '#38bdf8' : idx > 28 ? '#f43f5e' : '#8b5cf6',
-                      borderRadius: '2px 2px 0 0'
-                    }} 
-                    title={`Bin ${idx}: weight ~ ${(x * tensor.stdDev).toFixed(4)}`}
-                  />
-                );
-              })}
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '10px', fontSize: '11px', color: '#94a3b8', fontFamily: 'JetBrains Mono' }}>
-              <span>{tensor.min} (Tail)</span>
-              <span>μ = {tensor.mean} (Mean Peak)</span>
-              <span>+{tensor.max} (Tail)</span>
-            </div>
-          </div>
-        )}
-      </div>
+      )}
     </div>
   );
 }

@@ -1,10 +1,9 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import Sidebar, { NAV_ITEMS } from './components/common/Sidebar';
 import TopHeader from './components/common/TopHeader';
 import CommandApprovalModal from './components/common/CommandApprovalModal';
-import { MODEL_CATALOG } from './data/mockModels';
+import { api, useApi } from './api';
 
-// 16 Complete Screen Views
 import DashboardView from './views/DashboardView';
 import ModelImportView from './views/ModelImportView';
 import ModelOverviewView from './views/ModelOverviewView';
@@ -22,230 +21,128 @@ import ExperimentManagerView from './views/ExperimentManagerView';
 import InferenceChatView from './views/InferenceChatView';
 import ModelExportView from './views/ModelExportView';
 
+function stored(key, fallback) {
+  try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
+}
+
 export default function App() {
-  const [activeScreen, setActiveScreen] = useState('dashboard');
-  const [activeModel, setActiveModel] = useState(MODEL_CATALOG[0]);
-  const [selectedLayer, setSelectedLayer] = useState(12);
-  const [selectedTensorKey, setSelectedTensorKey] = useState('model.layers.12.self_attn.q_proj.weight');
+  const [activeScreen, setActiveScreen] = useState(() => stored('studio.screen', 'dashboard'));
+  const [activeModelId, setActiveModelId] = useState(() => stored('studio.model', null));
+  const [selectedLayer, setSelectedLayer] = useState(0);
+  const [selectedTensor, setSelectedTensor] = useState(null);
+  const [activeRunId, setActiveRunId] = useState(null);
+  const [terminalTab, setTerminalTab] = useState('terminal');
+  const [pending, setPending] = useState(null); // {command, params, explanation}
+  const [launchError, setLaunchError] = useState(null);
 
-  // Command Approval Modal (Human-in-the-Loop) State
-  const [approvalModalOpen, setApprovalModalOpen] = useState(false);
-  const [pendingCommand, setPendingCommand] = useState('');
-  const [pendingExplanation, setPendingExplanation] = useState('');
+  const modelsRes = useApi('/api/models');
+  const system = useApi('/api/system', 3000);
+  const env = useApi('/api/env', 5000);
+  const runsRes = useApi('/api/runs', 5000);
 
-  // Technical Docs / Specification Modal State
-  const [docsModalOpen, setDocsModalOpen] = useState(false);
+  const models = useMemo(() => modelsRes.data?.models || [], [modelsRes.data]);
+  const activeModel = models.find((m) => m.id === activeModelId) || models[0] || null;
+  const runs = useMemo(() => runsRes.data?.runs || [], [runsRes.data]);
 
-  // Training state
-  const [trainingState, setTrainingState] = useState({
-    isRunning: true,
-    step: 520,
-    maxSteps: 6000,
-    epoch: 1,
-    maxEpochs: 3,
-    loss: 0.853,
-    evalLoss: 0.912,
-    vramUsed: 5.12,
-    vramTotal: 6.00,
-    gpuUtil: 88,
-    elapsed: '1h 23m 12s',
-    eta: '2h 10m'
-  });
+  useEffect(() => { try { localStorage.setItem('studio.screen', activeScreen); } catch { /* ignore */ } }, [activeScreen]);
+  useEffect(() => {
+    if (activeModel) { try { localStorage.setItem('studio.model', activeModel.id); } catch { /* ignore */ } }
+  }, [activeModel]);
+  useEffect(() => {
+    if (!activeRunId && runs.length) {
+      const live = runs.find((r) => r.state === 'running');
+      setActiveRunId((live || runs[0]).id);
+    }
+  }, [runs, activeRunId]);
 
-  const currentNav = NAV_ITEMS.find(n => n.id === activeScreen) || NAV_ITEMS[0];
+  const navigate = useCallback((s, opts = {}) => {
+    if (opts.terminalTab) setTerminalTab(opts.terminalTab);
+    setActiveScreen(s);
+  }, []);
+  const selectModel = useCallback((m) => { setActiveModelId(m.id); setSelectedTensor(null); setSelectedLayer(0); }, []);
 
-  const handleRequestLaunchTraining = ({ command, config }) => {
-    setPendingCommand(command);
-    setPendingExplanation(`Fine-tuning launch requested for ${activeModel.name} using ${config.method}. This will spawn a Python subprocess inside an isolated process group (os.setsid) and stream logs to the PTY terminal.`);
-    setApprovalModalOpen(true);
+  const handleRequestLaunch = ({ command, params, config }) => {
+    setLaunchError(null);
+    setPending({
+      command, params,
+      explanation: `Fine-tune ${config.model_name} with ${config.method.toUpperCase()} on ${config.dataset} ` +
+        `(${config.dataset_records} records, ${config.dataset_format} format). Runs Unsloth in a separate ` +
+        `process group; logs and metrics stream to data/runs/${config.run_id}/.`,
+    });
   };
 
-  const handleApproveCommand = (executedCmd) => {
-    setActiveScreen('training_live');
+  const handleApprove = async (command) => {
+    try {
+      const r = await api('/api/train/launch', { method: 'POST', body: { params: pending.params, command } });
+      setActiveRunId(r.runId);
+      setPending(null);
+      runsRes.reload();
+      setActiveScreen('training_live');
+    } catch (e) {
+      setLaunchError(e.message);
+    }
   };
+
+  const currentNav = NAV_ITEMS.find((n) => n.id === activeScreen) || NAV_ITEMS[0];
+  const common = { activeModel, models, onNavigate: navigate, onSelectModel: selectModel };
 
   return (
     <div className="app-container">
-      {/* 1. Cyber Sidebar Navigation (16 items) */}
-      <Sidebar 
-        activeScreen={activeScreen} 
-        onSelectScreen={(screenId) => setActiveScreen(screenId)} 
-      />
+      <Sidebar activeScreen={activeScreen} onSelectScreen={(s) => setActiveScreen(s)}
+        modelCount={models.length} runCount={runs.length} system={system.data}
+        trainingLive={runs.some((r) => r.state === 'running')} />
 
-      {/* 2. Main Workstation Area */}
       <div className="main-wrapper">
-        <TopHeader 
+        <TopHeader
           currentScreenTitle={currentNav.label}
-          currentScreenSubtitle={`Active: ${activeModel.name} (${activeModel.format})`}
-          activeModel={activeModel}
-          models={MODEL_CATALOG}
-          onSelectModel={setActiveModel}
-          onOpenTerminal={() => setActiveScreen('terminal')}
-          onOpenDocs={() => setDocsModalOpen(true)}
+          currentScreenSubtitle={activeModel ? `Active: ${activeModel.name} (${activeModel.format})` : 'No model selected'}
+          activeModel={activeModel} models={models} onSelectModel={selectModel}
+          system={system.data} env={env.data} backendError={modelsRes.error || system.error}
+          onOpenTerminal={() => navigate('terminal', { terminalTab: 'terminal' })}
+          onOpenEnv={() => navigate('terminal', { terminalTab: 'doctor' })}
         />
 
-        {/* 3. Screen Viewport */}
         <main className="page-viewport">
-          {activeScreen === 'dashboard' && (
-            <DashboardView 
-              onNavigate={(s) => setActiveScreen(s)} 
-              activeModel={activeModel} 
-            />
-          )}
-
-          {activeScreen === 'model_import' && (
-            <ModelImportView 
-              models={MODEL_CATALOG}
-              activeModel={activeModel}
-              onSelectModel={setActiveModel}
-              onNavigate={(s) => setActiveScreen(s)}
-            />
-          )}
-
-          {activeScreen === 'model_overview' && (
-            <ModelOverviewView 
-              activeModel={activeModel}
-              onNavigate={(s) => setActiveScreen(s)}
-            />
-          )}
-
-          {activeScreen === 'arch_overall' && (
-            <ArchitectureOverallView 
-              activeModel={activeModel}
-              onSelectLayer={(l) => {
-                setSelectedLayer(l);
-                setActiveScreen('layer_detail');
-              }}
-              onNavigate={(s) => setActiveScreen(s)}
-            />
-          )}
-
-          {activeScreen === 'layer_detail' && (
-            <LayerDetailedView 
-              activeLayer={selectedLayer}
-              onSelectLayer={setSelectedLayer}
-              onNavigate={(s) => setActiveScreen(s)}
-              onSelectTensor={(t) => {
-                setSelectedTensorKey(t);
-                setActiveScreen('tensor_inspect');
-              }}
-            />
-          )}
-
-          {activeScreen === 'tensor_inspect' && (
-            <TensorInspectorView 
-              selectedTensorKey={selectedTensorKey}
-            />
-          )}
-
-          {activeScreen === 'tokenizer' && (
-            <TokenizerView 
-              activeModel={activeModel}
-            />
-          )}
-
-          {activeScreen === 'datasets' && (
-            <DatasetManagerView 
-              onNavigate={(s) => setActiveScreen(s)}
-            />
-          )}
-
-          {activeScreen === 'fine_tuning' && (
-            <FineTuningConfigView 
-              activeModel={activeModel}
-              models={MODEL_CATALOG}
-              onRequestLaunchTraining={handleRequestLaunchTraining}
-            />
-          )}
-
-          {activeScreen === 'training_live' && (
-            <TrainingProgressView 
-              trainingState={trainingState}
-              onStopTraining={() => setActiveScreen('fine_tuning')}
-              onNavigate={(s) => setActiveScreen(s)}
-            />
-          )}
-
-          {activeScreen === 'comparison' && (
-            <BeforeAfterComparisonView 
-              activeModel={activeModel}
-              onNavigate={(s) => setActiveScreen(s)}
-            />
-          )}
-
-          {activeScreen === 'terminal' && (
-            <TerminalView />
-          )}
-
-          {activeScreen === 'monitoring' && (
-            <SystemMonitorView />
-          )}
-
-          {activeScreen === 'experiments' && (
-            <ExperimentManagerView 
-              onNavigate={(s) => setActiveScreen(s)}
-            />
-          )}
-
-          {activeScreen === 'inference_chat' && (
-            <InferenceChatView 
-              activeModel={activeModel}
-            />
-          )}
-
-          {activeScreen === 'export_deploy' && (
-            <ModelExportView 
-              activeModel={activeModel}
-              onNavigate={(s) => setActiveScreen(s)}
-            />
-          )}
+          {activeScreen === 'dashboard' && <DashboardView {...common} system={system.data} env={env.data} runs={runs} />}
+          {activeScreen === 'model_import' && <ModelImportView {...common} library={modelsRes.data?.library} loading={modelsRes.loading}
+            error={modelsRes.error} onModelsChanged={modelsRes.reload} env={env.data} />}
+          {activeScreen === 'model_overview' && <ModelOverviewView {...common}
+            onSelectTensor={(t) => { setSelectedTensor(t); setActiveScreen('tensor_inspect'); }} />}
+          {activeScreen === 'arch_overall' && <ArchitectureOverallView {...common}
+            onSelectLayer={(l) => { setSelectedLayer(l); setActiveScreen('layer_detail'); }} />}
+          {activeScreen === 'layer_detail' && <LayerDetailedView {...common} activeLayer={selectedLayer} onSelectLayer={setSelectedLayer}
+            onSelectTensor={(t) => { setSelectedTensor(t); setActiveScreen('tensor_inspect'); }} />}
+          {activeScreen === 'tensor_inspect' && <TensorInspectorView {...common} selectedTensor={selectedTensor} onSelectTensor={setSelectedTensor} />}
+          {activeScreen === 'tokenizer' && <TokenizerView {...common} />}
+          {activeScreen === 'datasets' && <DatasetManagerView {...common} />}
+          {activeScreen === 'fine_tuning' && <FineTuningConfigView {...common} env={env.data} system={system.data}
+            onRequestLaunchTraining={handleRequestLaunch} />}
+          {activeScreen === 'training_live' && <TrainingProgressView {...common} runs={runs} runId={activeRunId}
+            onSelectRun={setActiveRunId} onRunsChanged={runsRes.reload} system={system.data} />}
+          {activeScreen === 'comparison' && <BeforeAfterComparisonView {...common} />}
+          {activeScreen === 'monitoring' && <SystemMonitorView system={system.data} env={env.data} />}
+          {activeScreen === 'experiments' && <ExperimentManagerView {...common} runs={runs} onRunsChanged={runsRes.reload}
+            onOpenRun={(id) => { setActiveRunId(id); setActiveScreen('training_live'); }} onModelsChanged={modelsRes.reload} />}
+          {activeScreen === 'inference_chat' && <InferenceChatView {...common} />}
+          {activeScreen === 'export_deploy' && <ModelExportView {...common} env={env.data} onModelsChanged={modelsRes.reload} />}
+          {/* Terminal stays mounted so the shell session survives navigation */}
+          <div style={{ display: activeScreen === 'terminal' ? 'block' : 'none' }}>
+            <TerminalView visible={activeScreen === 'terminal'} tab={terminalTab} onTabChange={setTerminalTab}
+              env={env.data} onEnvChanged={env.reload} />
+          </div>
         </main>
       </div>
 
-      {/* Human-in-the-Loop Command Approval Security Modal */}
-      <CommandApprovalModal 
-        isOpen={approvalModalOpen}
-        onClose={() => setApprovalModalOpen(false)}
-        onApprove={handleApproveCommand}
-        command={pendingCommand}
-        explanation={pendingExplanation}
+      <CommandApprovalModal
+        key={pending?.command || 'none'}
+        isOpen={!!pending}
+        onClose={() => setPending(null)}
+        onApprove={handleApprove}
+        command={pending?.command || ''}
+        explanation={pending?.explanation}
+        error={launchError}
         riskLevel="Resource Intensive"
       />
-
-      {/* Master Technical Architecture Modal */}
-      {docsModalOpen && (
-        <div className="modal-overlay" onClick={() => setDocsModalOpen(false)}>
-          <div className="modal-dialog" style={{ maxWidth: '800px', maxHeight: '85vh', display: 'flex', flexDirection: 'column' }} onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
-              <h3 style={{ fontSize: '16px', fontWeight: 700, color: '#f8fafc' }}>
-                Master Technical Architecture & Specification (20 Deliverables)
-              </h3>
-              <button className="btn-icon" onClick={() => setDocsModalOpen(false)}>✕</button>
-            </div>
-            <div style={{ flex: 1, overflowY: 'auto', padding: '14px', background: '#090e1a', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.06)', fontSize: '12.5px', color: '#cbd5e1', lineHeight: '1.6' }}>
-              <p style={{ color: '#38bdf8', marginBottom: '8px' }}>
-                The complete Master Specification document has been generated in your workspace artifacts:
-              </p>
-              <div style={{ fontFamily: 'JetBrains Mono', background: '#040711', padding: '8px 12px', borderRadius: '6px', color: '#10b981', marginBottom: '14px' }}>
-                master_technical_specification.md
-              </div>
-              <h4 style={{ color: '#fff', fontSize: '13px', marginTop: '10px' }}>Key Architecture Highlights:</h4>
-              <ul style={{ paddingLeft: '18px', marginTop: '6px' }}>
-                <li><strong>Zero-Copy Header Introspection:</strong> Uses mmap to read Safetensors JSON descriptors without loading weights into RAM.</li>
-                <li><strong>WebGL/Three.js 3D Acceleration:</strong> Dynamic parametric surface elevation meshes with Jet/Spectral colormaps, 3D loss terrain, and token trajectories.</li>
-                <li><strong>Unsloth & QLoRA Pipeline:</strong> Triton/CUDA kernels reducing VRAM by up to 80% with 4-bit NormalFloat base quantization.</li>
-                <li><strong>PTY Process Isolation:</strong> Linux process groups with os.setsid() and Human-in-the-Loop execution gates.</li>
-                <li><strong>Differential Parameter Analysis:</strong> Delta W = B * A matrix elevation comparisons between frozen base and LoRA checkpoints.</li>
-              </ul>
-            </div>
-            <div style={{ marginTop: '14px', textAlign: 'right' }}>
-              <button className="btn btn-primary" onClick={() => setDocsModalOpen(false)}>
-                Close Viewer
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

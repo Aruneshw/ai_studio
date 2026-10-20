@@ -1,0 +1,8 @@
+# Studio backend (the Unsloth training stack is installed automatically on first start)
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+psutil>=5.9
+numpy>=1.26
+tokenizers>=0.19
+huggingface_hub>=0.23

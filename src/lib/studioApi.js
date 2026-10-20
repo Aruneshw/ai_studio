@@ -16,6 +16,8 @@ export const studioApi = {
   ollamaModels: () => request('/api/ollama/models').then((b) => b.models),
   pullOllamaModel: (model) => request('/api/ollama/pull', { method: 'POST', body: JSON.stringify({ model }) }),
   installToolkit: () => request('/api/setup/install', { method: 'POST', body: '{}' }),
+  preflight: (config) => request('/api/train/preflight', { method: 'POST', body: JSON.stringify(config) }),
+  startTraining: (command) => request('/api/train/start', { method: 'POST', body: JSON.stringify({ command }) }),
   listJobs: () => request('/api/jobs').then((b) => b.jobs),
   startJob: ({ command, label, kind }) => request('/api/jobs', { method: 'POST', body: JSON.stringify({ command, label, kind }) }),
   killJob: (id) => request(`/api/jobs/${id}/kill`, { method: 'POST', body: '{}' }),
@@ -35,7 +37,8 @@ export function useJobStream(jobId) {
     es.addEventListener('meta', (e) => setState({ lines: [], job: JSON.parse(e.data) }));
     es.addEventListener('line', (e) => {
       const line = JSON.parse(e.data);
-      setState((s) => ({ ...s, lines: [...s.lines, line] }));
+      // Progress-bar redraws replace the previous line instead of appending
+      setState((s) => ({ ...s, lines: line.replace && s.lines.length ? [...s.lines.slice(0, -1), line] : [...s.lines, line] }));
     });
     es.addEventListener('end', (e) => {
       setState((s) => ({ ...s, job: JSON.parse(e.data) }));
@@ -47,12 +50,15 @@ export function useJobStream(jobId) {
   return state;
 }
 
-// Parses "[[METRIC]] {...}" lines printed by server/scripts/train_unsloth.py
-export function parseMetric(text) {
-  if (!text.startsWith('[[METRIC]] ')) return null;
+// Parses "[[TAG]] {...}" lines printed by server/scripts/train_unsloth.py (METRIC, STAGE, ERROR)
+export function parseTagged(text, tag) {
+  const prefix = `[[${tag}]] `;
+  if (!text.startsWith(prefix)) return null;
   try {
-    return JSON.parse(text.slice(11));
+    return JSON.parse(text.slice(prefix.length));
   } catch {
     return null;
   }
 }
+
+export const parseMetric = (text) => parseTagged(text, 'METRIC');

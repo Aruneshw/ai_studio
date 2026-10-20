@@ -65,7 +65,7 @@ export default function App() {
   };
 
   const handleApproveCommand = (executedCmd) => {
-    studioApi.startJob({ command: executedCmd, label: 'Unsloth fine-tuning run', kind: 'train' })
+    studioApi.startTraining(executedCmd)
       .then((job) => setActiveJobId(job.id))
       .catch((e) => window.alert(`Could not start training: ${e.message}`));
   };

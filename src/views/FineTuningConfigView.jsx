@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Play, Sliders, Sparkles, Download, RefreshCw, Package, Terminal, Cpu } from 'lucide-react';
+import { Play, Sliders, Sparkles, Download, RefreshCw, Package, Terminal, Cpu, Wand2, ShieldCheck, Loader } from 'lucide-react';
 import LiveTerminal from '../components/common/LiveTerminal';
 import { studioApi, useJobStream } from '../lib/studioApi';
+import { RECOMMENDED_MODELS, bestFitModel, estimateVramGb, isValidModelRef } from '../lib/vram';
+
+const CHECK_STYLE = { ok: ['#10b981', '✓'], warn: ['#fbbf24', '⚠'], error: ['#f87171', '✗'] };
 
 // Single-quote a value for bash so paths/names with spaces or quotes are passed verbatim.
 const shq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
@@ -45,6 +48,7 @@ export default function FineTuningConfigView({
   const [hfRepo, setHfRepo] = useState('');
   const [runName, setRunName] = useState(() => `run-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}`);
   const [exportOllamaName, setExportOllamaName] = useState('');
+  const [preflight, setPreflight] = useState(null); // { running } | { ok, checks }
 
   const refreshStatus = useCallback(() => {
     studioApi.status()
@@ -86,7 +90,9 @@ export default function FineTuningConfigView({
     setHfRepo(selectedOllama?.hfRepo || '');
   }, [modelId, selectedOllama?.hfRepo]);
 
-  const paramsB = selectedOllama?.paramsB ?? 3;
+  const knownRepo = RECOMMENDED_MODELS.find((m) => m.repo.toLowerCase() === hfRepo.trim().toLowerCase());
+  const paramsB = knownRepo?.paramsB ?? selectedOllama?.paramsB ?? 3;
+  const repoLooksValid = isValidModelRef(hfRepo);
 
   const handleInstall = () => {
     studioApi.installToolkit().then((job) => onJobStarted(job.id)).catch((e) => setBackendError(e.message));
@@ -97,22 +103,31 @@ export default function FineTuningConfigView({
     studioApi.pullOllamaModel(pullName.trim()).then((job) => onJobStarted(job.id)).catch((e) => setOllamaError(e.message));
   };
 
-  // VRAM Estimation Logic
-  const calcEstimatedVram = () => {
-    const base = paramsB * (use4bit ? 0.7 : 2.1); // 4-bit NF4 vs FP16/BF16 weights
-    const loraMem = (parseInt(loraRank) / 16) * 0.45 * Math.max(paramsB / 8, 0.25);
-    // Activations scale with micro-batch, context and model width; gradient accumulation adds none
-    const actMem = parseInt(batchSize) * (parseInt(maxSeqLength) / 2048) * (gradCheckpointing ? 0.4 : 1.6) * Math.max(paramsB / 8, 0.25);
-    const cudaOverhead = 0.6;
-    return (base + loraMem + actMem + cudaOverhead).toFixed(1);
-  };
-
-  const estimatedVram = calcEstimatedVram();
+  // VRAM Estimation Logic (same formula the backend preflight uses)
+  const vramOpts = { use4bit, loraRank, batchSize, maxSeqLength, gradCheckpointing };
+  const estimatedVram = estimateVramGb({ ...vramOpts, paramsB }).toFixed(1);
   const availableVram = status?.gpu?.vramTotalGb ?? 6.0; // detected via nvidia-smi, RTX 3050 Laptop fallback
   const isVramSafe = parseFloat(estimatedVram) <= availableVram;
+  const bestFit = bestFitModel(availableVram, vramOpts);
 
-  const handleLaunchClick = () => {
+  const buildConfig = () => ({
+    hfRepo: hfRepo.trim(), paramsB, datasetPath: datasetPath.trim(), runName, exportOllama: exportOllamaName.trim(),
+    use4bit, loraRank: +loraRank, batchSize: +batchSize, maxSeqLength: +maxSeqLength, gradCheckpointing,
+  });
+
+  // Every launch runs the backend preflight first; only a clean (or warning-only) result opens approval.
+  const handleLaunchClick = async () => {
     if (!status) return;
+    setPreflight({ running: true });
+    let result;
+    try {
+      result = await studioApi.preflight(buildConfig());
+    } catch (e) {
+      setPreflight({ ok: false, checks: [{ level: 'error', label: 'Preflight', detail: e.message, fix: 'Make sure npm run dev is running.' }] });
+      return;
+    }
+    setPreflight(result);
+    if (!result.ok) return;
     const modules = Object.keys(targetModules).filter((k) => targetModules[k]).join(',');
     const outputDir = `${status.paths.runsDir}/${runName}`;
     const args = [
@@ -155,10 +170,10 @@ export default function FineTuningConfigView({
     ? 'Local backend offline (run npm run dev)'
     : !status.toolkitReady
       ? 'Install the fine-tuning toolkit first'
-      : !selectedOllama
-        ? 'Select a local Ollama model'
       : !hfRepo.trim()
-        ? 'Set the Hugging Face repo for this model'
+        ? 'Choose a model (or click Best fit for my GPU)'
+      : !repoLooksValid
+        ? 'Model must be owner/name (e.g. unsloth/Qwen3-4B)'
         : !datasetPath.trim()
           ? 'Choose a dataset'
           : null;
@@ -286,9 +301,11 @@ export default function FineTuningConfigView({
           <div className="form-group">
             <label className="form-label">Target Base Model</label>
             <select className="select" value={modelId} onChange={(e) => setModelId(e.target.value)}>
-              {ollamaModels.length === 0 && (
-                <option value="">{ollamaError ? 'Ollama not reachable — start `ollama serve`' : 'No Ollama models installed — pull one above'}</option>
-              )}
+              <option value="">
+                {ollamaModels.length === 0
+                  ? (ollamaError ? 'Ollama not reachable — use a Hugging Face model below' : 'No Ollama models installed — use a Hugging Face model below')
+                  : '— None: train the Hugging Face model below —'}
+              </option>
               {ollamaModels.map(m => (
                 <option key={m.name} value={`ollama:${m.name}`}>
                   {m.name} ({m.paramSize || '?'} {m.quantization || ''}){m.hfRepo ? '' : ' — needs HF repo'}
@@ -302,13 +319,46 @@ export default function FineTuningConfigView({
 
           <div className="form-group">
             <label className="form-label">Trainable Weights (Hugging Face repo or local path)</label>
-            <input
-              className="input"
-              value={hfRepo}
-              onChange={(e) => setHfRepo(e.target.value)}
-              placeholder="e.g. unsloth/Llama-3.2-3B-Instruct"
-              style={{ fontFamily: 'JetBrains Mono' }}
-            />
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <input
+                className="input"
+                list="recommended-models"
+                value={hfRepo}
+                onChange={(e) => setHfRepo(e.target.value)}
+                placeholder="e.g. unsloth/Qwen3-4B — pick from the list"
+                style={{ fontFamily: 'JetBrains Mono', borderColor: hfRepo && !repoLooksValid ? '#f87171' : undefined }}
+              />
+              <button className="btn btn-secondary" style={{ whiteSpace: 'nowrap' }} onClick={() => setHfRepo(bestFit.repo)} title={`Largest recommended model that fits ${availableVram} GB`}>
+                <Wand2 size={14} /> Best fit for my GPU
+              </button>
+            </div>
+            <datalist id="recommended-models">
+              {RECOMMENDED_MODELS.map((m) => {
+                const est = estimateVramGb({ ...vramOpts, paramsB: m.paramsB });
+                return <option key={m.repo} value={m.repo}>{`${m.label} • ~${est} GB ${est <= availableVram * 0.9 ? '✓ fits' : '✗ too big'}`}</option>;
+              })}
+            </datalist>
+            {hfRepo && !repoLooksValid && (
+              <div style={{ fontSize: '11px', color: '#f87171', marginTop: '4px' }}>
+                This must be a model id like <code>owner/model-name</code>, not a description. Use “Best fit for my GPU” to pick one automatically.
+              </div>
+            )}
+            {repoLooksValid && !isVramSafe && (
+              <div style={{ fontSize: '11px', color: '#fbbf24', marginTop: '4px' }}>
+                ⚠ ~{estimatedVram} GB needed but your GPU has {availableVram} GB — this will run out of memory.{' '}
+                <button className="btn btn-secondary" style={{ padding: '1px 8px', fontSize: '11px' }} onClick={() => setHfRepo(bestFit.repo)}>
+                  Use {bestFit.label} instead
+                </button>
+              </div>
+            )}
+            {selectedOllama && selectedOllama.hfRepoSource === 'search' && hfRepo === selectedOllama.hfRepo && (
+              <div style={{ fontSize: '11px', color: '#38bdf8', marginTop: '4px' }}>Matched {selectedOllama.name} to {hfRepo} automatically via Hugging Face search.</div>
+            )}
+            {selectedOllama && !selectedOllama.hfRepo && (
+              <div style={{ fontSize: '11px', color: '#fbbf24', marginTop: '4px' }}>
+                No trainable Hugging Face checkpoint found for {selectedOllama.name}. Pick one from the list or use Best fit.
+              </div>
+            )}
             <div style={{ fontSize: '10.5px', color: '#64748b', marginTop: '4px' }}>
               Ollama stores quantized GGUF files, which cannot be trained directly. The studio trains the matching
               Hugging Face checkpoint and can export the result back into Ollama.
@@ -465,6 +515,36 @@ export default function FineTuningConfigView({
           </button>
         </div>
       </div>
+
+      {/* Preflight results: shown after Start is clicked */}
+      {preflight && (
+        <div className="card">
+          <div className="card-header">
+            <div className="card-title">
+              {preflight.running ? <Loader size={16} color="#06b6d4" className="spin" /> : <ShieldCheck size={16} color={preflight.ok ? '#10b981' : '#f87171'} />}
+              <span>Pre-launch Checks</span>
+            </div>
+            {!preflight.running && (
+              <span className={`badge ${preflight.ok ? 'badge-emerald' : 'badge-rose'}`}>
+                {preflight.ok ? 'Ready — approve the command to start' : 'Fix the errors below, then click Start again'}
+              </span>
+            )}
+          </div>
+          {preflight.running ? (
+            <div style={{ fontSize: '12px', color: '#94a3b8' }}>Checking model, dataset, GPU memory and disk…</div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '12px' }}>
+              {preflight.checks.map((c, i) => (
+                <div key={i} style={{ padding: '8px 10px', background: '#090e1a', borderRadius: '6px', borderLeft: `3px solid ${CHECK_STYLE[c.level][0]}` }}>
+                  <span style={{ color: CHECK_STYLE[c.level][0], fontWeight: 600 }}>{CHECK_STYLE[c.level][1]} {c.label}</span>
+                  <span style={{ color: '#cbd5e1' }}> — {c.detail}</span>
+                  {c.fix && c.level !== 'ok' && <div style={{ color: '#94a3b8', fontSize: '11px', marginTop: '2px' }}>Fix: {c.fix}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Live output of the current install / pull / training job */}
       <div className="card">

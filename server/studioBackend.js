@@ -8,6 +8,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createJob, getJob, killAllJobs, listJobs, runShellJob, streamJob } from './jobs.js';
 import { mapOllamaToHf, parseParamSize } from './ollamaMap.js';
+import { searchUnslothRepo } from './hf.js';
+import { runPreflight } from './preflight.js';
 
 const SERVER_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(SERVER_DIR, '..');
@@ -98,7 +100,7 @@ async function listOllamaModels() {
   const r = await fetch(`${ollamaBase()}/api/tags`, { signal: AbortSignal.timeout(4000) });
   if (!r.ok) throw new Error(`Ollama responded ${r.status}`);
   const { models = [] } = await r.json();
-  return models.map((m) => ({
+  const list = models.map((m) => ({
     name: m.name,
     sizeBytes: m.size,
     modifiedAt: m.modified_at,
@@ -108,7 +110,41 @@ async function listOllamaModels() {
     quantization: m.details?.quantization_level || null,
     format: m.details?.format || 'gguf',
     hfRepo: mapOllamaToHf(m.name),
+    hfRepoSource: 'table',
   }));
+  // Tags the static table doesn't know (new releases) are looked up on the Hub.
+  await Promise.all(list.filter((m) => !m.hfRepo).map(async (m) => {
+    m.hfRepo = await searchUnslothRepo(m.name);
+    m.hfRepoSource = m.hfRepo ? 'search' : null;
+  }));
+  return list;
+}
+
+// Ollama keeps recently used models resident in VRAM; free it before training.
+async function unloadOllamaModels() {
+  try {
+    const r = await fetch(`${ollamaBase()}/api/ps`, { signal: AbortSignal.timeout(2000) });
+    const { models = [] } = await r.json();
+    for (const m of models) {
+      await fetch(`${ollamaBase()}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: m.name, keep_alive: 0 }),
+        signal: AbortSignal.timeout(10000),
+      });
+    }
+    return models.map((m) => m.name);
+  } catch {
+    return [];
+  }
+}
+
+function readEnvReport() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(STUDIO_HOME, 'env_ready.json'), 'utf8'));
+  } catch {
+    return null;
+  }
 }
 
 // Streams `ollama pull` progress through the Ollama HTTP API (works even if the CLI isn't on PATH).
@@ -170,10 +206,7 @@ async function handle(req, res) {
 
   if (req.method === 'GET' && p === '/api/studio/status') {
     const [gpu, ollama] = await Promise.all([getGpu(), getOllamaInfo()]);
-    let envReport = null;
-    try {
-      envReport = JSON.parse(fs.readFileSync(path.join(STUDIO_HOME, 'env_ready.json'), 'utf8'));
-    } catch { /* not installed yet */ }
+    const envReport = readEnvReport();
     return sendJson(res, 200, {
       paths: PATHS,
       projectRoot: PROJECT_ROOT,
@@ -210,6 +243,29 @@ async function handle(req, res) {
       env: { STUDIO_HOME },
     });
     return sendJson(res, 200, installJob.summary());
+  }
+
+  if (req.method === 'POST' && p === '/api/train/preflight') {
+    const cfg = await readBody(req);
+    const [gpu, ollama] = await Promise.all([getGpu(), getOllamaInfo()]);
+    const envReport = readEnvReport();
+    const status = { paths: PATHS, envReport, toolkitReady: envReport?.ok === true, ollama };
+    return sendJson(res, 200, await runPreflight(cfg, { status, gpu }));
+  }
+
+  if (req.method === 'POST' && p === '/api/train/start') {
+    const { command } = await readBody(req);
+    if (!command || typeof command !== 'string') return sendJson(res, 400, { error: 'command is required' });
+    const unloaded = await unloadOllamaModels();
+    const job = runShellJob({
+      kind: 'train',
+      label: 'Unsloth fine-tuning run',
+      command,
+      cwd: PROJECT_ROOT,
+      env: { STUDIO_HOME, PYTORCH_CUDA_ALLOC_CONF: 'expandable_segments:True' },
+      preface: unloaded.length ? [`Freed GPU memory: unloaded Ollama model(s) ${unloaded.join(', ')}`] : [],
+    });
+    return sendJson(res, 200, job.summary());
   }
 
   if (req.method === 'GET' && p === '/api/jobs') return sendJson(res, 200, { jobs: listJobs() });

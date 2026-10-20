@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { Square, Loader } from 'lucide-react';
-import { useJobStream, parseMetric, studioApi } from '../../lib/studioApi';
+import { useJobStream, parseMetric, parseTagged, studioApi } from '../../lib/studioApi';
 
 const STATUS_BADGE = {
   running: ['badge-cyan', 'Running'],
@@ -41,6 +41,8 @@ export default function LiveTerminal({ jobId, height = 360, emptyText = 'No proc
 
   const lastMetric = [...lines].reverse().map((l) => parseMetric(l.text)).find(Boolean);
   const stepLine = [...lines].reverse().find((l) => /^==> \[\d+\/\d+\]/.test(l.text));
+  const lastStage = [...lines].reverse().map((l) => parseTagged(l.text, 'STAGE')).find(Boolean);
+  const failure = [...lines].reverse().map((l) => parseTagged(l.text, 'ERROR')).find(Boolean);
   const [badgeClass, badgeText] = STATUS_BADGE[job?.status] || ['badge-cyan', 'Idle'];
 
   return (
@@ -55,6 +57,7 @@ export default function LiveTerminal({ jobId, height = 360, emptyText = 'No proc
           <span style={{ fontSize: '11px', color: '#64748b', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
             {job ? `#${job.id} ${job.label}` : 'bash — idle'}
             {stepLine ? `  •  ${stepLine.text.slice(4)}` : ''}
+            {lastStage && job?.status === 'running' ? `  •  ${lastStage.label}` : ''}
           </span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -87,6 +90,7 @@ export default function LiveTerminal({ jobId, height = 360, emptyText = 'No proc
       >
         {!jobId && <div style={{ color: '#475569' }}>{emptyText}</div>}
         {lines.map((line, idx) => {
+          if (line.text.startsWith('[[STAGE]] ') || line.text.startsWith('[[ERROR]] ')) return null; // shown in header / card
           const metric = parseMetric(line.text);
           return (
             <div key={idx} style={{ color: metric ? '#22d3ee' : lineColor(line), whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontWeight: line.stream === 'cmd' ? 600 : 400 }}>
@@ -95,6 +99,14 @@ export default function LiveTerminal({ jobId, height = 360, emptyText = 'No proc
           );
         })}
       </div>
+
+      {failure && (
+        <div style={{ padding: '12px 14px', background: 'rgba(244, 63, 94, 0.08)', borderTop: '1px solid rgba(244, 63, 94, 0.35)', fontFamily: 'Inter, sans-serif' }}>
+          <div style={{ color: '#f87171', fontWeight: 700, fontSize: '13px' }}>✗ {failure.title}</div>
+          <div style={{ color: '#cbd5e1', fontSize: '12px', marginTop: '4px', whiteSpace: 'pre-wrap' }}>{failure.detail}</div>
+          <div style={{ color: '#34d399', fontSize: '12px', marginTop: '6px' }}>How to fix: {failure.fix}</div>
+        </div>
+      )}
     </div>
   );
 }

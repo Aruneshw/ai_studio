@@ -25,16 +25,35 @@ class Job {
     this.onKill = null;
   }
 
-  // Accepts raw chunks; splits on \n and \r so pip/ollama progress output streams cleanly.
+  // Accepts raw chunks. Text ending in a bare \r is a progress-bar redraw (tqdm, pip, uv):
+  // it is marked transient and the next update replaces it in place instead of adding a line.
   writeChunk(chunk, stream = 'out') {
-    const text = (this.partial + chunk.toString()).replace(ANSI_RE, '');
-    const parts = text.split(/\r\n|\n|\r/);
-    this.partial = parts.pop();
-    for (const p of parts) if (p.trim() !== '') this.writeLine(p, stream);
+    let text = (this.partial + chunk.toString()).replace(ANSI_RE, '');
+    // "\r" ended the previous chunk and "\n" starts this one: it was a plain \r\n line ending.
+    if (this.endedWithCR && text.startsWith('\n')) {
+      const prev = this.lines[this.lines.length - 1];
+      if (prev) prev.transient = false;
+      text = text.slice(1);
+    }
+    const re = /([^\r\n]*)(\r\n|\n|\r)/g;
+    let m;
+    let last = 0;
+    while ((m = re.exec(text))) {
+      last = re.lastIndex;
+      if (m[1].trim() !== '') this.writeLine(m[1], stream, m[2] === '\r');
+    }
+    this.partial = text.slice(last);
+    this.endedWithCR = text.endsWith('\r');
   }
 
-  writeLine(text, stream = 'out') {
-    const line = { t: Date.now(), stream, text };
+  writeLine(text, stream = 'out', transient = false) {
+    const line = { t: Date.now(), stream, text, transient };
+    const prev = this.lines[this.lines.length - 1];
+    if (prev?.transient && prev.stream === stream) {
+      this.lines[this.lines.length - 1] = line;
+      this.broadcast('line', { ...line, replace: true });
+      return;
+    }
     this.lines.push(line);
     if (this.lines.length > MAX_LINES) this.lines.splice(0, this.lines.length - MAX_LINES);
     this.broadcast('line', line);
@@ -86,8 +105,9 @@ export function createJob(opts) {
 }
 
 // Spawn a bash command in its own process group so Stop kills pip/python children too.
-export function runShellJob({ kind = 'shell', label, command, cwd, env }) {
+export function runShellJob({ kind = 'shell', label, command, cwd, env, preface = [] }) {
   const job = createJob({ kind, label: label || command.split('\n')[0].slice(0, 80), command });
+  for (const text of preface) job.writeLine(text, 'sys');
   job.writeLine(`$ ${command}`, 'cmd');
 
   const child = spawn('bash', ['-lc', command], {

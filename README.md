@@ -31,6 +31,19 @@ It only answers same-origin requests to `localhost`, because it executes command
    VRAM stream live; the LoRA adapter is saved to `~/.ai_studio/runs/<run-name>/lora_adapter`.
    Fill *Export to Ollama as* to also build a GGUF and register it with `ollama create`.
 
+### Built-in safety net
+
+- **Pre-launch checks** run on every *Start*: model id format and existence on Hugging Face, gated-model token,
+  dataset file/rows/format, GPU memory fit, disk space, run/export names and llama.cpp build tools.
+  Errors block the launch and each one shows a concrete fix.
+- **Best fit for my GPU** picks the largest recommended model that fits your VRAM; models that won't fit are flagged.
+- Ollama tags missing from the built-in table are matched to Unsloth checkpoints via Hugging Face search.
+- Loaded Ollama models are unloaded from VRAM before training starts.
+- The trainer retries CUDA out-of-memory automatically (smaller micro-batch, then shorter context), skips unusable
+  dataset rows, falls back to all-linear LoRA targets for unusual architectures, and ends failures with a plain
+  "what went wrong / how to fix" card.
+- The installer matches PyTorch to your NVIDIA driver's CUDA version and verifies on the GPU before reporting ready.
+
 **12. Linux Terminal** runs any non-interactive command for real, with live output, job history, Stop
 (kills the whole process group) and an environment doctor.
 

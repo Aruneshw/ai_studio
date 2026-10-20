@@ -79,7 +79,9 @@ async function getGpu() {
   const out = await run('nvidia-smi', ['--query-gpu=name,memory.total,memory.used,utilization.gpu', '--format=csv,noheader,nounits']);
   if (!out) return null;
   const [name, total, used, util] = out.split('\n')[0].split(',').map((s) => s.trim());
-  return { name, vramTotalGb: +(total / 1024).toFixed(2), vramUsedGb: +(used / 1024).toFixed(2), utilization: +util };
+  const header = await run('nvidia-smi', []);
+  const driverCuda = header?.match(/CUDA Version:\s*([\d.]+)/)?.[1] || null;
+  return { name, driverCuda, vramTotalGb: +(total / 1024).toFixed(2), vramUsedGb: +(used / 1024).toFixed(2), utilization: +util };
 }
 
 async function getOllamaInfo() {
@@ -176,7 +178,7 @@ async function handle(req, res) {
       paths: PATHS,
       projectRoot: PROJECT_ROOT,
       venvExists: fs.existsSync(VENV_PYTHON),
-      toolkitReady: Boolean(envReport?.unsloth && envReport?.trl && envReport?.peft),
+      toolkitReady: envReport?.ok === true, // written by the installer only when every GPU check passed
       envReport,
       installRunning: installJob?.status === 'running' ? installJob.id : null,
       gpu,

@@ -213,7 +213,7 @@ export default function FineTuningConfigView({
                 <Cpu size={13} /> {status?.gpu ? status.gpu.name : 'No NVIDIA GPU detected'}
               </div>
               <div style={{ color: '#94a3b8', fontSize: '11px', marginTop: '4px' }}>
-                {status?.gpu ? `${status.gpu.vramUsedGb} / ${status.gpu.vramTotalGb} GB VRAM in use` : 'nvidia-smi not found — training needs a CUDA GPU'}
+                {status?.gpu ? `${status.gpu.vramUsedGb} / ${status.gpu.vramTotalGb} GB VRAM in use • driver CUDA ${status.gpu.driverCuda || '?'}` : 'nvidia-smi not found — training needs a CUDA GPU'}
               </div>
             </div>
 
@@ -232,8 +232,10 @@ export default function FineTuningConfigView({
               </div>
               <div style={{ color: '#94a3b8', fontSize: '11px', marginTop: '4px', marginBottom: '8px' }}>
                 {status?.toolkitReady
-                  ? `torch ${status.envReport.torch} • trl ${status.envReport.trl} • peft ${status.envReport.peft} • CUDA ${status.envReport.cuda ? 'on' : 'off'}`
-                  : 'Installs unsloth, torch, trl, peft, accelerate, bitsandbytes, datasets into ~/.ai_studio/venv'}
+                  ? `torch ${status.envReport.torch} (CUDA ${status.envReport.torch_cuda}) • unsloth ${status.envReport.unsloth} • GPU checks passed`
+                  : status?.envReport
+                    ? 'Last install failed a GPU check — click Install to repair it automatically'
+                    : 'Detects your driver and installs a matching PyTorch + unsloth, trl, peft, bitsandbytes into ~/.ai_studio/venv'}
               </div>
               <button className="btn btn-primary" style={{ padding: '6px 10px', fontSize: '11px', width: '100%' }} onClick={handleInstall} disabled={!status}>
                 <Download size={12} />

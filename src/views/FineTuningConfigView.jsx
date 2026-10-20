@@ -7,14 +7,12 @@ import { studioApi, useJobStream } from '../lib/studioApi';
 const shq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
 
 export default function FineTuningConfigView({ 
-  activeModel, 
-  models = [], 
   onRequestLaunchTraining,
   activeJobId,
   onJobStarted
 }) {
   const [method, setMethod] = useState('lora_unsloth');
-  const [modelId, setModelId] = useState(activeModel.id);
+  const [modelId, setModelId] = useState(''); // 'ollama:<name>' of a model installed on this machine
   const [datasetPath, setDatasetPath] = useState('');
   const [learningRate, setLearningRate] = useState('2e-4');
   const [batchSize, setBatchSize] = useState('2');
@@ -63,8 +61,8 @@ export default function FineTuningConfigView({
       .then((list) => {
         setOllamaModels(list);
         setOllamaError('');
-        // Default the picker to a local Ollama model the first time they show up
-        setModelId((cur) => (cur.startsWith('ollama:') || !list.length ? cur : `ollama:${list[0].name}`));
+        // Keep the current pick if it's still installed, otherwise select the first local model
+        setModelId((cur) => (list.some((m) => `ollama:${m.name}` === cur) ? cur : list.length ? `ollama:${list[0].name}` : ''));
       })
       .catch((e) => setOllamaError(e.message));
   }, []);
@@ -82,14 +80,13 @@ export default function FineTuningConfigView({
     if (watchedJob.kind === 'install') refreshStatus();
   }, [watchedJob, refreshOllama, refreshStatus]);
 
-  const selectedOllama = modelId.startsWith('ollama:') ? ollamaModels.find((m) => `ollama:${m.name}` === modelId) : null;
-  const selectedCatalog = models.find((m) => m.id === modelId);
+  const selectedOllama = ollamaModels.find((m) => `ollama:${m.name}` === modelId) || null;
 
   useEffect(() => {
     setHfRepo(selectedOllama?.hfRepo || '');
   }, [modelId, selectedOllama?.hfRepo]);
 
-  const paramsB = selectedOllama?.paramsB ?? (parseFloat(selectedCatalog?.parameterCount) || 8);
+  const paramsB = selectedOllama?.paramsB ?? 3;
 
   const handleInstall = () => {
     studioApi.installToolkit().then((job) => onJobStarted(job.id)).catch((e) => setBackendError(e.message));
@@ -158,6 +155,8 @@ export default function FineTuningConfigView({
     ? 'Local backend offline (run npm run dev)'
     : !status.toolkitReady
       ? 'Install the fine-tuning toolkit first'
+      : !selectedOllama
+        ? 'Select a local Ollama model'
       : !hfRepo.trim()
         ? 'Set the Hugging Face repo for this model'
         : !datasetPath.trim()
@@ -285,19 +284,18 @@ export default function FineTuningConfigView({
           <div className="form-group">
             <label className="form-label">Target Base Model</label>
             <select className="select" value={modelId} onChange={(e) => setModelId(e.target.value)}>
-              <optgroup label={`Ollama — local (${ollamaModels.length})`}>
-                {ollamaModels.map(m => (
-                  <option key={m.name} value={`ollama:${m.name}`}>
-                    {m.name} ({m.paramSize || '?'} {m.quantization || ''}){m.hfRepo ? '' : ' — needs HF repo'}
-                  </option>
-                ))}
-              </optgroup>
-              <optgroup label="Studio catalog">
-                {models.map(m => (
-                  <option key={m.id} value={m.id}>{m.name} ({m.format})</option>
-                ))}
-              </optgroup>
+              {ollamaModels.length === 0 && (
+                <option value="">{ollamaError ? 'Ollama not reachable — start `ollama serve`' : 'No Ollama models installed — pull one above'}</option>
+              )}
+              {ollamaModels.map(m => (
+                <option key={m.name} value={`ollama:${m.name}`}>
+                  {m.name} ({m.paramSize || '?'} {m.quantization || ''}){m.hfRepo ? '' : ' — needs HF repo'}
+                </option>
+              ))}
             </select>
+            <div style={{ fontSize: '10.5px', color: '#64748b', marginTop: '4px' }}>
+              Only models installed on this machine (<code>ollama list</code>) are shown.
+            </div>
           </div>
 
           <div className="form-group">

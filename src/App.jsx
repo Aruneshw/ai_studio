@@ -158,8 +158,6 @@ export default function App() {
 
           {activeScreen === 'fine_tuning' && (
             <FineTuningConfigView 
-              activeModel={activeModel}
-              models={MODEL_CATALOG}
               onRequestLaunchTraining={handleRequestLaunchTraining}
               activeJobId={activeJobId}
               onJobStarted={setActiveJobId}

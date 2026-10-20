@@ -50,7 +50,7 @@ It only answers same-origin requests to `localhost`, because it executes command
 ## Requirements
 
 - Linux with an NVIDIA GPU + driver (`nvidia-smi` must work). A 6 GB card handles 1–3B models in 4-bit comfortably.
-- Python 3.10–3.13 with `venv` (`sudo apt install python3-venv`); [`uv`](https://docs.astral.sh/uv/) is used automatically if installed (much faster).
+- `curl` or `wget`. The installer fetches [`uv`](https://docs.astral.sh/uv/) and a Python 3.12 runtime itself; no system Python setup needed.
 - Node 20+, Ollama.
 
 Environment variables: `STUDIO_HOME` (default `~/.ai_studio`), `OLLAMA_HOST` (default `127.0.0.1:11434`).

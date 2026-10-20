@@ -24,6 +24,11 @@ import subprocess
 import sys
 import time
 import traceback
+import warnings
+
+# Unsloth still sets HF_HUB_ENABLE_HF_TRANSFER, which newer huggingface_hub reports as deprecated
+# (downloads use Xet now). It is harmless noise in the live terminal, so hide just that warning.
+warnings.filterwarnings("ignore", message=".*HF_HUB_ENABLE_HF_TRANSFER.*")
 
 
 def parse_args(argv=None):
@@ -280,7 +285,6 @@ def export_to_ollama(model, tokenizer, args):
 def main(args):
     t0 = time.time()
     os.makedirs(args.output_dir, exist_ok=True)
-    os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 

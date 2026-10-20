@@ -78,7 +78,7 @@ export default function LayerDetailedView({
             }} 
           >
             <span style={{ position: 'absolute', top: '-12px', left: '50%', transform: 'translateX(-50%)', background: '#0d121f', padding: '0 8px', fontSize: '10px', color: '#ec4899', fontFamily: 'JetBrains Mono' }}>
-              Residual Connection ($x + \text{SubLayer}(x)$)
+              Residual Connection (x + SubLayer(x))
             </span>
           </div>
 

@@ -51,7 +51,7 @@ export default function BeforeAfterComparisonView({ activeModel, onNavigate }) {
               Before vs. After Model Comparison & Differential Inspector
             </h2>
             <p style={{ fontSize: '12px', color: '#94a3b8' }}>
-              Side-by-side inference generation and 3D parameter delta ($\Delta W = B \times A$) surface analysis
+              Side-by-side inference generation and 3D parameter delta (ΔW = B × A) surface analysis
             </p>
           </div>
         </div>
@@ -169,7 +169,7 @@ export default function BeforeAfterComparisonView({ activeModel, onNavigate }) {
         <div className="card-header">
           <div className="card-title">
             <BarChart2 size={16} color="#06b6d4" />
-            <span>LoRA Parameter Delta Surface ($\Delta W = \frac{\alpha}{r} B \cdot A$)</span>
+            <span>LoRA Parameter Delta Surface (ΔW = (α / r) · B · A)</span>
           </div>
           <span className="badge badge-cyan">3D Difference Elevation Map</span>
         </div>

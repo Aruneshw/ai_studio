@@ -63,14 +63,14 @@ export default function ArchitectureOverallView({ activeModel, onSelectLayer, on
               <div style={{ padding: '10px', background: 'rgba(2, 132, 199, 0.1)', border: '1px solid rgba(2, 132, 199, 0.25)', borderRadius: '6px' }}>
                 <strong style={{ color: '#38bdf8' }}>1. Token Embedding</strong>
                 <p style={{ color: '#94a3b8', fontSize: '11px', marginTop: '2px' }}>
-                  Maps input token IDs into a 4,096-dimensional dense vector space $X_0 \in \mathbb{R}^{T \times 4096}$.
+                  Maps input token IDs into a 4,096-dimensional dense vector space X₀ ∈ ℝ^(T × 4096).
                 </p>
               </div>
 
               <div style={{ padding: '10px', background: 'rgba(139, 92, 246, 0.1)', border: '1px solid rgba(139, 92, 246, 0.25)', borderRadius: '6px' }}>
                 <strong style={{ color: '#a855f7' }}>2. 32x Transformer Blocks</strong>
                 <p style={{ color: '#94a3b8', fontSize: '11px', marginTop: '2px' }}>
-                  Each block performs: RMSNorm $\to$ Grouped-Query Multi-Head Attention $\to$ Residual Add $\to$ RMSNorm $\to$ SwiGLU MLP $\to$ Residual Add.
+                  Each block performs: RMSNorm → Grouped-Query Multi-Head Attention → Residual Add → RMSNorm → SwiGLU MLP → Residual Add.
                 </p>
               </div>
 

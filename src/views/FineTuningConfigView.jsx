@@ -1,16 +1,23 @@
-import React, { useState } from 'react';
-import { Play, Sliders, Cpu, ShieldCheck, AlertCircle, Info, Sparkles } from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { Play, Sliders, Sparkles, Download, RefreshCw, Package, Terminal, Cpu } from 'lucide-react';
+import LiveTerminal from '../components/common/LiveTerminal';
+import { studioApi, useJobStream } from '../lib/studioApi';
+
+// Single-quote a value for bash so paths/names with spaces or quotes are passed verbatim.
+const shq = (v) => `'${String(v).replace(/'/g, `'\\''`)}'`;
 
 export default function FineTuningConfigView({ 
   activeModel, 
   models = [], 
-  onRequestLaunchTraining 
+  onRequestLaunchTraining,
+  activeJobId,
+  onJobStarted
 }) {
   const [method, setMethod] = useState('lora_unsloth');
   const [modelId, setModelId] = useState(activeModel.id);
-  const [datasetId, setDatasetId] = useState('alpaca_instructions');
+  const [datasetPath, setDatasetPath] = useState('');
   const [learningRate, setLearningRate] = useState('2e-4');
-  const [batchSize, setBatchSize] = useState('4');
+  const [batchSize, setBatchSize] = useState('2');
   const [gradAccum, setGradAccum] = useState('2');
   const [epochs, setEpochs] = useState('3');
   const [maxSeqLength, setMaxSeqLength] = useState('2048');
@@ -31,29 +38,111 @@ export default function FineTuningConfigView({
   const [gradCheckpointing, setGradCheckpointing] = useState(true);
   const [saveCheckpoints, setSaveCheckpoints] = useState(true);
 
+  // Local backend state: environment, Ollama models, run outputs
+  const [status, setStatus] = useState(null);
+  const [backendError, setBackendError] = useState('');
+  const [ollamaModels, setOllamaModels] = useState([]);
+  const [ollamaError, setOllamaError] = useState('');
+  const [pullName, setPullName] = useState('llama3.2:3b');
+  const [hfRepo, setHfRepo] = useState('');
+  const [runName, setRunName] = useState(() => `run-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}`);
+  const [exportOllamaName, setExportOllamaName] = useState('');
+
+  const refreshStatus = useCallback(() => {
+    studioApi.status()
+      .then((st) => {
+        setStatus(st);
+        setBackendError('');
+        setDatasetPath((d) => d || st.paths.sampleDataset);
+      })
+      .catch((e) => setBackendError(e.message));
+  }, []);
+
+  const refreshOllama = useCallback(() => {
+    studioApi.ollamaModels()
+      .then((list) => {
+        setOllamaModels(list);
+        setOllamaError('');
+        // Default the picker to a local Ollama model the first time they show up
+        setModelId((cur) => (cur.startsWith('ollama:') || !list.length ? cur : `ollama:${list[0].name}`));
+      })
+      .catch((e) => setOllamaError(e.message));
+  }, []);
+
+  useEffect(() => {
+    refreshStatus();
+    refreshOllama();
+  }, [refreshStatus, refreshOllama]);
+
+  // When a pull / install job finishes, re-read models and environment automatically
+  const { job: watchedJob } = useJobStream(activeJobId);
+  useEffect(() => {
+    if (!watchedJob || watchedJob.status === 'running') return;
+    if (watchedJob.kind === 'ollama_pull') refreshOllama();
+    if (watchedJob.kind === 'install') refreshStatus();
+  }, [watchedJob, refreshOllama, refreshStatus]);
+
+  const selectedOllama = modelId.startsWith('ollama:') ? ollamaModels.find((m) => `ollama:${m.name}` === modelId) : null;
+  const selectedCatalog = models.find((m) => m.id === modelId);
+
+  useEffect(() => {
+    setHfRepo(selectedOllama?.hfRepo || '');
+  }, [modelId, selectedOllama?.hfRepo]);
+
+  const paramsB = selectedOllama?.paramsB ?? (parseFloat(selectedCatalog?.parameterCount) || 8);
+
+  const handleInstall = () => {
+    studioApi.installToolkit().then((job) => onJobStarted(job.id)).catch((e) => setBackendError(e.message));
+  };
+
+  const handlePull = () => {
+    if (!pullName.trim()) return;
+    studioApi.pullOllamaModel(pullName.trim()).then((job) => onJobStarted(job.id)).catch((e) => setOllamaError(e.message));
+  };
+
   // VRAM Estimation Logic
   const calcEstimatedVram = () => {
-    let base = 3.2; // Base FP16/4-bit weights
-    if (!use4bit) base = 15.5; // FP16 8B model requires ~16GB without 4bit
-    const loraMem = (parseInt(loraRank) / 16) * 0.45;
-    const actMem = (parseInt(batchSize) * parseInt(gradAccum) * (parseInt(maxSeqLength) / 2048)) * (gradCheckpointing ? 0.8 : 2.5);
+    const base = paramsB * (use4bit ? 0.7 : 2.1); // 4-bit NF4 vs FP16/BF16 weights
+    const loraMem = (parseInt(loraRank) / 16) * 0.45 * Math.max(paramsB / 8, 0.25);
+    // Activations scale with micro-batch, context and model width; gradient accumulation adds none
+    const actMem = parseInt(batchSize) * (parseInt(maxSeqLength) / 2048) * (gradCheckpointing ? 0.4 : 1.6) * Math.max(paramsB / 8, 0.25);
     const cudaOverhead = 0.6;
     return (base + loraMem + actMem + cudaOverhead).toFixed(1);
   };
 
   const estimatedVram = calcEstimatedVram();
-  const availableVram = 6.0; // RTX 3050 Laptop VRAM
+  const availableVram = status?.gpu?.vramTotalGb ?? 6.0; // detected via nvidia-smi, RTX 3050 Laptop fallback
   const isVramSafe = parseFloat(estimatedVram) <= availableVram;
 
   const handleLaunchClick = () => {
-    // Generate actual Linux CLI command for Unsloth / Hugging Face training
-    const cmd = `python -m unsloth.train \\\n  --model_name "${modelId}" \\\n  --dataset "alpaca_instructions.jsonl" \\\n  --learning_rate ${learningRate} \\\n  --batch_size ${batchSize} \\\n  --gradient_accumulation_steps ${gradAccum} \\\n  --epochs ${epochs} \\\n  --max_seq_length ${maxSeqLength} \\\n  --lora_r ${loraRank} \\\n  --lora_alpha ${loraAlpha} \\\n  --load_in_4bit ${use4bit ? 'True' : 'False'} \\\n  --gradient_checkpointing ${gradCheckpointing ? 'True' : 'False'} \\\n  --output_dir "./checkpoints/exp-01"`;
+    if (!status) return;
+    const modules = Object.keys(targetModules).filter((k) => targetModules[k]).join(',');
+    const outputDir = `${status.paths.runsDir}/${runName}`;
+    const args = [
+      `--model_name ${shq(hfRepo)}`,
+      `--dataset ${shq(datasetPath)}`,
+      `--output_dir ${shq(outputDir)}`,
+      `--learning_rate ${learningRate}`,
+      `--batch_size ${batchSize}`,
+      `--gradient_accumulation_steps ${gradAccum}`,
+      `--epochs ${epochs}`,
+      `--max_seq_length ${maxSeqLength}`,
+      `--lora_r ${loraRank}`,
+      `--lora_alpha ${loraAlpha}`,
+      `--target_modules ${modules}`,
+      `--load_in_4bit ${use4bit ? 'True' : 'False'}`,
+      `--gradient_checkpointing ${gradCheckpointing ? 'True' : 'False'}`,
+      `--save_steps ${saveCheckpoints ? 500 : 0}`,
+    ];
+    if (exportOllamaName.trim()) args.push(`--export_ollama ${shq(exportOllamaName.trim())}`);
+    const cmd = `${shq(status.paths.venvPython)} ${shq(status.paths.trainScript)} \\\n  ${args.join(' \\\n  ')}`;
 
     onRequestLaunchTraining({
       command: cmd,
       config: {
         method,
         modelId,
+        hfRepo,
         learningRate,
         batchSize,
         epochs,
@@ -64,6 +153,16 @@ export default function FineTuningConfigView({
       }
     });
   };
+
+  const launchBlocker = !status
+    ? 'Local backend offline (run npm run dev)'
+    : !status.toolkitReady
+      ? 'Install the fine-tuning toolkit first'
+      : !hfRepo.trim()
+        ? 'Set the Hugging Face repo for this model'
+        : !datasetPath.trim()
+          ? 'Choose a dataset'
+          : null;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
@@ -92,6 +191,76 @@ export default function FineTuningConfigView({
         </div>
       </div>
 
+      {/* Local Environment: toolkit install + Ollama */}
+      <div className="card">
+        <div className="card-header">
+          <div className="card-title">
+            <Package size={16} color="#10b981" />
+            <span>Fine-Tuning Environment</span>
+          </div>
+          <button className="btn btn-secondary" style={{ padding: '4px 10px', fontSize: '11px' }} onClick={() => { refreshStatus(); refreshOllama(); }}>
+            <RefreshCw size={12} /> Re-check
+          </button>
+        </div>
+
+        {backendError ? (
+          <div style={{ fontSize: '12px', color: '#f87171' }}>
+            Local backend not reachable: {backendError}. Start the studio with <code>npm run dev</code> (the backend runs inside the Vite server).
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px', fontSize: '12px' }}>
+            <div style={{ padding: '12px', background: '#090e1a', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.05)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, color: status?.gpu ? '#10b981' : '#fbbf24' }}>
+                <Cpu size={13} /> {status?.gpu ? status.gpu.name : 'No NVIDIA GPU detected'}
+              </div>
+              <div style={{ color: '#94a3b8', fontSize: '11px', marginTop: '4px' }}>
+                {status?.gpu ? `${status.gpu.vramUsedGb} / ${status.gpu.vramTotalGb} GB VRAM in use` : 'nvidia-smi not found — training needs a CUDA GPU'}
+              </div>
+            </div>
+
+            <div style={{ padding: '12px', background: '#090e1a', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.05)' }}>
+              <div style={{ fontWeight: 600, color: status?.ollama?.reachable ? '#10b981' : '#fbbf24' }}>
+                {status?.ollama?.reachable ? `✓ Ollama ${status.ollama.version} — ${ollamaModels.length} local model(s)` : '⚠ Ollama not reachable'}
+              </div>
+              <div style={{ color: '#94a3b8', fontSize: '11px', marginTop: '4px' }}>
+                {status?.ollama?.reachable ? status.ollama.host : `Start it with: ollama serve (${status?.ollama?.host || 'http://127.0.0.1:11434'})`}
+              </div>
+            </div>
+
+            <div style={{ padding: '12px', background: '#090e1a', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.05)' }}>
+              <div style={{ fontWeight: 600, color: status?.toolkitReady ? '#10b981' : '#fbbf24' }}>
+                {status?.toolkitReady ? '✓ Unsloth toolkit installed' : '⚠ Unsloth toolkit not installed'}
+              </div>
+              <div style={{ color: '#94a3b8', fontSize: '11px', marginTop: '4px', marginBottom: '8px' }}>
+                {status?.toolkitReady
+                  ? `torch ${status.envReport.torch} • trl ${status.envReport.trl} • peft ${status.envReport.peft} • CUDA ${status.envReport.cuda ? 'on' : 'off'}`
+                  : 'Installs unsloth, torch, trl, peft, accelerate, bitsandbytes, datasets into ~/.ai_studio/venv'}
+              </div>
+              <button className="btn btn-primary" style={{ padding: '6px 10px', fontSize: '11px', width: '100%' }} onClick={handleInstall} disabled={!status}>
+                <Download size={12} />
+                {status?.installRunning ? 'Installing… (view output below)' : status?.toolkitReady ? 'Reinstall / Upgrade Toolkit' : 'Install Everything Automatically'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: '8px', marginTop: '12px', alignItems: 'center' }}>
+          <span style={{ fontSize: '12px', color: '#94a3b8', whiteSpace: 'nowrap' }}>Pull from Ollama:</span>
+          <input
+            className="input"
+            value={pullName}
+            onChange={(e) => setPullName(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handlePull()}
+            placeholder="e.g. llama3.2:3b, qwen2.5:1.5b, gemma3:1b"
+            style={{ fontFamily: 'JetBrains Mono' }}
+          />
+          <button className="btn btn-secondary" onClick={handlePull} disabled={!status?.ollama?.reachable}>
+            <Download size={14} /> Pull
+          </button>
+        </div>
+        {ollamaError && <div style={{ fontSize: '11px', color: '#f87171', marginTop: '6px' }}>{ollamaError}</div>}
+      </div>
+
       {/* Main 2-Column Configuration Grid */}
       <div style={{ display: 'grid', gridTemplateColumns: '1.1fr 1fr', gap: '20px' }}>
         {/* Left Column: General Hyperparameters */}
@@ -109,25 +278,57 @@ export default function FineTuningConfigView({
               <option value="lora_unsloth">LoRA (Unsloth Accelerated - 5x Speed)</option>
               <option value="qlora_4bit">QLoRA (4-bit NF4 Quantization)</option>
               <option value="sft">Supervised Fine-Tuning (SFT)</option>
-              <option value="dpo">Direct Preference Optimization (DPO)</option>
+              <option value="dpo" disabled>Direct Preference Optimization (DPO) — coming soon</option>
             </select>
           </div>
 
           <div className="form-group">
             <label className="form-label">Target Base Model</label>
             <select className="select" value={modelId} onChange={(e) => setModelId(e.target.value)}>
-              {models.map(m => (
-                <option key={m.id} value={m.id}>{m.name} ({m.format})</option>
-              ))}
+              <optgroup label={`Ollama — local (${ollamaModels.length})`}>
+                {ollamaModels.map(m => (
+                  <option key={m.name} value={`ollama:${m.name}`}>
+                    {m.name} ({m.paramSize || '?'} {m.quantization || ''}){m.hfRepo ? '' : ' — needs HF repo'}
+                  </option>
+                ))}
+              </optgroup>
+              <optgroup label="Studio catalog">
+                {models.map(m => (
+                  <option key={m.id} value={m.id}>{m.name} ({m.format})</option>
+                ))}
+              </optgroup>
             </select>
           </div>
 
           <div className="form-group">
-            <label className="form-label">Training Dataset</label>
-            <select className="select" value={datasetId} onChange={(e) => setDatasetId(e.target.value)}>
-              <option value="alpaca_instructions">alpaca_instructions.jsonl (2,000 rows)</option>
-              <option value="dpo_pairwise_preferences">dpo_code_preferences.json (1,250 pairs)</option>
-            </select>
+            <label className="form-label">Trainable Weights (Hugging Face repo or local path)</label>
+            <input
+              className="input"
+              value={hfRepo}
+              onChange={(e) => setHfRepo(e.target.value)}
+              placeholder="e.g. unsloth/Llama-3.2-3B-Instruct"
+              style={{ fontFamily: 'JetBrains Mono' }}
+            />
+            <div style={{ fontSize: '10.5px', color: '#64748b', marginTop: '4px' }}>
+              Ollama stores quantized GGUF files, which cannot be trained directly. The studio trains the matching
+              Hugging Face checkpoint and can export the result back into Ollama.
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label className="form-label">Training Dataset (.jsonl / .json path or HF dataset id)</label>
+            <input
+              className="input"
+              list="dataset-suggestions"
+              value={datasetPath}
+              onChange={(e) => setDatasetPath(e.target.value)}
+              style={{ fontFamily: 'JetBrains Mono' }}
+            />
+            <datalist id="dataset-suggestions">
+              {status && <option value={status.paths.sampleDataset}>Bundled sample (16 security Q&A rows)</option>}
+              <option value="yahma/alpaca-cleaned">Alpaca cleaned (52k rows)</option>
+              <option value="mlabonne/FineTome-100k">FineTome 100k (chat)</option>
+            </datalist>
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px' }}>
@@ -240,16 +441,40 @@ export default function FineTuningConfigView({
             </label>
           </div>
 
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '12px' }}>
+            <div className="form-group">
+              <label className="form-label">Run Name (output folder)</label>
+              <input className="input" value={runName} onChange={(e) => setRunName(e.target.value.replace(/[^\w.-]/g, '-'))} style={{ fontFamily: 'JetBrains Mono' }} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Export to Ollama as (optional)</label>
+              <input className="input" value={exportOllamaName} onChange={(e) => setExportOllamaName(e.target.value)} placeholder="my-finetuned-model" style={{ fontFamily: 'JetBrains Mono' }} />
+            </div>
+          </div>
+
           {/* Big Start Fine-Tuning Action Button */}
           <button 
             className="btn btn-primary" 
             style={{ width: '100%', padding: '12px', fontSize: '14px', fontWeight: 700 }}
             onClick={handleLaunchClick}
+            disabled={Boolean(launchBlocker)}
+            title={launchBlocker || ''}
           >
             <Play size={16} />
-            <span>Start Fine-Tuning (Human-in-the-Loop Gate)</span>
+            <span>{launchBlocker || 'Start Fine-Tuning (Human-in-the-Loop Gate)'}</span>
           </button>
         </div>
+      </div>
+
+      {/* Live output of the current install / pull / training job */}
+      <div className="card">
+        <div className="card-header">
+          <div className="card-title">
+            <Terminal size={16} color="#06b6d4" />
+            <span>Live Terminal Output</span>
+          </div>
+        </div>
+        <LiveTerminal jobId={activeJobId} height={380} emptyText="Click Install, Pull or Start Fine-Tuning — the real command output streams here as it runs." />
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Terminal, ShieldAlert, CheckCircle, X, Play, Copy, Check } from 'lucide-react';
 
 export default function CommandApprovalModal({ 
@@ -12,6 +12,11 @@ export default function CommandApprovalModal({
 }) {
   const [editedCommand, setEditedCommand] = useState(command);
   const [copied, setCopied] = useState(false);
+
+  // Reset the editor whenever a new command is submitted for approval
+  useEffect(() => {
+    if (isOpen) setEditedCommand(command);
+  }, [isOpen, command]);
 
   if (!isOpen) return null;
 
@@ -84,7 +89,7 @@ export default function CommandApprovalModal({
               background: '#040711',
               border: '1px solid rgba(6, 182, 212, 0.3)',
               borderRadius: '8px',
-              minHeight: '90px',
+              minHeight: '220px',
               padding: '10px'
             }}
             value={editedCommand}

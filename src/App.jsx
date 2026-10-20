@@ -3,6 +3,7 @@ import Sidebar, { NAV_ITEMS } from './components/common/Sidebar';
 import TopHeader from './components/common/TopHeader';
 import CommandApprovalModal from './components/common/CommandApprovalModal';
 import { MODEL_CATALOG } from './data/mockModels';
+import { studioApi } from './lib/studioApi';
 
 // 16 Complete Screen Views
 import DashboardView from './views/DashboardView';
@@ -33,6 +34,9 @@ export default function App() {
   const [pendingCommand, setPendingCommand] = useState('');
   const [pendingExplanation, setPendingExplanation] = useState('');
 
+  // Backend job whose live output is shown in the Fine-Tuning and Terminal screens
+  const [activeJobId, setActiveJobId] = useState(null);
+
   // Technical Docs / Specification Modal State
   const [docsModalOpen, setDocsModalOpen] = useState(false);
 
@@ -56,12 +60,14 @@ export default function App() {
 
   const handleRequestLaunchTraining = ({ command, config }) => {
     setPendingCommand(command);
-    setPendingExplanation(`Fine-tuning launch requested for ${activeModel.name} using ${config.method}. This will spawn a Python subprocess inside an isolated process group (os.setsid) and stream logs to the PTY terminal.`);
+    setPendingExplanation(`Fine-tuning ${config.hfRepo} with ${config.method} (LoRA r=${config.loraRank}, ${config.use4bit ? '4-bit' : '16-bit'}). This runs the Unsloth trainer from ~/.ai_studio/venv in its own process group and streams its output live to the terminal below. The first run downloads the model weights from Hugging Face.`);
     setApprovalModalOpen(true);
   };
 
   const handleApproveCommand = (executedCmd) => {
-    setActiveScreen('training_live');
+    studioApi.startJob({ command: executedCmd, label: 'Unsloth fine-tuning run', kind: 'train' })
+      .then((job) => setActiveJobId(job.id))
+      .catch((e) => window.alert(`Could not start training: ${e.message}`));
   };
 
   return (
@@ -155,6 +161,8 @@ export default function App() {
               activeModel={activeModel}
               models={MODEL_CATALOG}
               onRequestLaunchTraining={handleRequestLaunchTraining}
+              activeJobId={activeJobId}
+              onJobStarted={setActiveJobId}
             />
           )}
 
@@ -174,7 +182,7 @@ export default function App() {
           )}
 
           {activeScreen === 'terminal' && (
-            <TerminalView />
+            <TerminalView activeJobId={activeJobId} onSelectJob={setActiveJobId} />
           )}
 
           {activeScreen === 'monitoring' && (

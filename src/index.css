@@ -760,3 +760,18 @@ body {
 .floating-element {
   animation: floatAnimation 4s ease-in-out infinite;
 }
+
+/* Live terminal activity spinner */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  filter: grayscale(0.4);
+}
